@@ -346,8 +346,17 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 	backend = v.newBackend(clientType)
 	defer backend.Close()
 
-	if err := backend.Connect(ctx, tcUrl, streamName); err != nil {
-		return errors.Wrapf(err, "connect backend, tcUrl=%v, stream=%v", tcUrl, streamName)
+	// For publisher connections, use ConnectWithRetry to enable automatic repick
+	// when the initially picked backend is unreachable.
+	// For viewer connections, use regular Connect to maintain stable backend mapping.
+	if clientType == RTMPClientTypePublisher {
+		if _, err := backend.ConnectWithRetry(ctx, tcUrl, streamName); err != nil {
+			return errors.Wrapf(err, "connect backend with retry, tcUrl=%v, stream=%v", tcUrl, streamName)
+		}
+	} else {
+		if err := backend.Connect(ctx, tcUrl, streamName); err != nil {
+			return errors.Wrapf(err, "connect backend, tcUrl=%v, stream=%v", tcUrl, streamName)
+		}
 	}
 
 	// Start the streaming.
@@ -518,27 +527,83 @@ func (v *rtmpClientToBackend) Close() error {
 	return nil
 }
 
+// BackendInfo contains information about the selected backend server.
+type BackendInfo struct {
+	// The selected backend server.
+	Server *lb.OriginServer
+	// The stream URL for the connection.
+	StreamURL string
+}
+
+// Connect establishes a connection to a backend server.
+// For publisher connections, if allowRepick is true and the first pick fails,
+// it will attempt to repick a different backend server.
 func (v *rtmpClientToBackend) Connect(ctx context.Context, tcUrl, streamName string) error {
+	_, err := v.connectWithRetry(ctx, tcUrl, streamName, false)
+	return err
+}
+
+// ConnectWithRetry establishes a connection to a backend server with retry support.
+// If the first pick fails, it will attempt to repick a different backend server.
+// Returns backend info for the caller to track which server was selected.
+func (v *rtmpClientToBackend) ConnectWithRetry(ctx context.Context, tcUrl, streamName string) (*BackendInfo, error) {
+	return v.connectWithRetry(ctx, tcUrl, streamName, true)
+}
+
+// connectWithRetry is the internal implementation that supports optional retry logic.
+// When allowRepick is true, for publisher connections, it will retry with a different server
+// if the first connection attempt fails.
+func (v *rtmpClientToBackend) connectWithRetry(ctx context.Context, tcUrl, streamName string, allowRepick bool) (*BackendInfo, error) {
 	// Build the stream URL in vhost/app/stream schema.
 	streamURL, err := utils.BuildStreamURL(fmt.Sprintf("%v/%v", tcUrl, streamName))
 	if err != nil {
-		return errors.Wrapf(err, "build stream url %v/%v", tcUrl, streamName)
+		return nil, errors.Wrapf(err, "build stream url %v/%v", tcUrl, streamName)
 	}
 
 	// Pick a backend SRS server to proxy the RTMP stream.
 	backend, err := v.loadBalancer.Pick(ctx, streamURL)
 	if err != nil {
-		return errors.Wrapf(err, "pick backend for %v", streamURL)
+		return nil, errors.Wrapf(err, "pick backend for %v", streamURL)
 	}
 
+	// Try to connect to the picked backend.
+	info, err := v.connectToBackend(ctx, backend, tcUrl, streamName, streamURL)
+	if err != nil {
+		// For publisher connections with retry enabled, try repicking a different server.
+		if allowRepick && v.typ == RTMPClientTypePublisher {
+			logger.Warn(ctx, "connect to backend %v failed for publisher, trying repick: %+v", backend.ID(), err)
+
+			// Clear the failed mapping and pick a new server.
+			newBackend, repickErr := v.loadBalancer.Repick(ctx, streamURL, backend.ID())
+			if repickErr != nil {
+				return nil, errors.Wrapf(repickErr, "repick backend for %v after failure", streamURL)
+			}
+
+			// Try connecting to the new backend.
+			info, err = v.connectToBackend(ctx, newBackend, tcUrl, streamName, streamURL)
+			if err != nil {
+				return nil, errors.Wrapf(err, "connect to repicked backend %v", newBackend.ID())
+			}
+			backend = newBackend
+		} else {
+			return nil, err
+		}
+	}
+
+	return info, nil
+}
+
+// connectToBackend attempts to connect to a specific backend server.
+// It performs the TCP connection, RTMP handshake, and initial protocol setup.
+func (v *rtmpClientToBackend) connectToBackend(ctx context.Context, backend *lb.OriginServer, tcUrl, streamName, streamURL string) (*BackendInfo, error) {
 	// Parse RTMP port from backend.
 	if len(backend.RTMP) == 0 {
-		return errors.Errorf("no rtmp server %+v for %v", backend, streamURL)
+		return nil, errors.Errorf("no rtmp server %+v for %v", backend, streamURL)
 	}
 
 	var rtmpPort int
 	if iv, err := strconv.ParseInt(backend.RTMP[0], 10, 64); err != nil {
-		return errors.Wrapf(err, "parse backend %+v rtmp port %v", backend, backend.RTMP[0])
+		return nil, errors.Wrapf(err, "parse backend %+v rtmp port %v", backend, backend.RTMP[0])
 	} else {
 		rtmpPort = int(iv)
 	}
@@ -546,7 +611,7 @@ func (v *rtmpClientToBackend) Connect(ctx context.Context, tcUrl, streamName str
 	// Connect to backend SRS server.
 	c, err := v.dial(ctx, backend.IP, rtmpPort)
 	if err != nil {
-		return errors.Wrapf(err, "dial backend ip=%v, port=%v, srs=%v", backend.IP, rtmpPort, backend)
+		return nil, errors.Wrapf(err, "dial backend ip=%v, port=%v, srs=%v", backend.IP, rtmpPort, backend)
 	}
 	v.tcpConn = c
 
@@ -556,25 +621,25 @@ func (v *rtmpClientToBackend) Connect(ctx context.Context, tcUrl, streamName str
 
 	// Simple RTMP handshake with server.
 	if err := hs.WriteC0S0(c); err != nil {
-		return errors.Wrapf(err, "write c0")
+		return nil, errors.Wrapf(err, "write c0")
 	}
 	if err := hs.WriteC1S1(c); err != nil {
-		return errors.Wrapf(err, "write c1")
+		return nil, errors.Wrapf(err, "write c1")
 	}
 
 	if _, err = hs.ReadC0S0(c); err != nil {
-		return errors.Wrapf(err, "read s0")
+		return nil, errors.Wrapf(err, "read s0")
 	}
 	if _, err := hs.ReadC1S1(c); err != nil {
-		return errors.Wrapf(err, "read s1")
+		return nil, errors.Wrapf(err, "read s1")
 	}
 	if _, err = hs.ReadC2S2(c); err != nil {
-		return errors.Wrapf(err, "read c2")
+		return nil, errors.Wrapf(err, "read c2")
 	}
 	logger.Debug(ctx, "backend simple handshake done, server=%v:%v", backend.IP, rtmpPort)
 
 	if err := hs.WriteC2S2(c, hs.C1S1()); err != nil {
-		return errors.Wrapf(err, "write c2")
+		return nil, errors.Wrapf(err, "write c2")
 	}
 
 	// Connect RTMP app on tcUrl with server.
@@ -582,25 +647,31 @@ func (v *rtmpClientToBackend) Connect(ctx context.Context, tcUrl, streamName str
 		connectApp := rtmp.NewConnectAppPacket()
 		connectApp.CommandObject.Set("tcUrl", rtmp.NewAmf0String(tcUrl))
 		if err := client.WritePacket(ctx, connectApp, 1); err != nil {
-			return errors.Wrapf(err, "write connect app")
+			return nil, errors.Wrapf(err, "write connect app")
 		}
 	}
 
 	if true {
 		var connectAppRes *rtmp.ConnectAppResPacket
 		if _, err := rtmp.ExpectPacket(ctx, client, &connectAppRes); err != nil {
-			return errors.Wrapf(err, "expect connect app res")
+			return nil, errors.Wrapf(err, "expect connect app res")
 		}
 		logger.Debug(ctx, "backend connect RTMP app, tcUrl=%v, id=%v", tcUrl, connectAppRes.SrsID())
 	}
 
 	// Play or view RTMP stream with server.
 	if v.typ == RTMPClientTypeViewer {
-		return v.play(ctx, client, streamName)
+		if err := v.play(ctx, client, streamName); err != nil {
+			return nil, err
+		}
+	} else {
+		// Publish RTMP stream with server.
+		if err := v.publish(ctx, client, streamName); err != nil {
+			return nil, err
+		}
 	}
 
-	// Publish RTMP stream with server.
-	return v.publish(ctx, client, streamName)
+	return &BackendInfo{Server: backend, StreamURL: streamURL}, nil
 }
 
 func (v *rtmpClientToBackend) publish(ctx context.Context, client rtmp.Protocol, streamName string) error {

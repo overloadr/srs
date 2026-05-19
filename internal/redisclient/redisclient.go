@@ -19,6 +19,7 @@ type RedisClient interface {
 	Ping(ctx context.Context) *redis.StatusCmd
 	Get(ctx context.Context, key string) *redis.StringCmd
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
 	String() string
 }
 

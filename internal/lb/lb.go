@@ -115,6 +115,10 @@ type OriginService interface {
 	Update(ctx context.Context, server *OriginServer) error
 	// Pick a backend server for the specified stream URL.
 	Pick(ctx context.Context, streamURL string) (*OriginServer, error)
+	// Repick clears the current mapping for the stream URL and picks a new backend server.
+	// This is used when the previously picked server becomes unreachable.
+	// If excludeServerID is provided, that server will be excluded from selection.
+	Repick(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error)
 }
 
 // HLSService is the interface for HLS session state, indexed by stream URL and SPBHID.

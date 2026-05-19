@@ -91,9 +91,25 @@ func (v *memoryLoadBalancer) Pick(ctx context.Context, streamURL string) (*Origi
 		return server, nil
 	}
 
+	return v.pickNewServer(ctx, streamURL, "")
+}
+
+func (v *memoryLoadBalancer) Repick(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
+	// Clear the current mapping for the stream URL.
+	v.picked.Delete(streamURL)
+
+	// Pick a new server, excluding the failed one.
+	return v.pickNewServer(ctx, streamURL, excludeServerID)
+}
+
+func (v *memoryLoadBalancer) pickNewServer(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
 	// Gather all servers that were alive within the last few seconds.
 	var servers []*OriginServer
 	v.servers.Range(func(key string, server *OriginServer) bool {
+		// Skip the excluded server.
+		if excludeServerID != "" && server.ID() == excludeServerID {
+			return true
+		}
 		if time.Since(server.UpdatedAt) < ServerAliveDuration {
 			servers = append(servers, server)
 		}
@@ -103,6 +119,10 @@ func (v *memoryLoadBalancer) Pick(ctx context.Context, streamURL string) (*Origi
 	// If no servers available, use all possible servers.
 	if len(servers) == 0 {
 		v.servers.Range(func(key string, server *OriginServer) bool {
+			// Skip the excluded server.
+			if excludeServerID != "" && server.ID() == excludeServerID {
+				return true
+			}
 			servers = append(servers, server)
 			return true
 		})

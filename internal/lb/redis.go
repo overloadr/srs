@@ -154,6 +154,22 @@ func (v *redisLoadBalancer) Pick(ctx context.Context, streamURL string) (*Origin
 		}
 	}
 
+	return v.pickNewServer(ctx, streamURL, "")
+}
+
+func (v *redisLoadBalancer) Repick(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
+	key := fmt.Sprintf("srs-proxy-url:%v", streamURL)
+
+	// Clear the current mapping for the stream URL.
+	v.rdb.Del(ctx, key)
+
+	// Pick a new server, excluding the failed one.
+	return v.pickNewServer(ctx, streamURL, excludeServerID)
+}
+
+func (v *redisLoadBalancer) pickNewServer(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
+	key := fmt.Sprintf("srs-proxy-url:%v", streamURL)
+
 	// Query all servers from redis, in json string.
 	var serverKeys []string
 	if b, err := v.rdb.Get(ctx, v.redisKeyServers()).Bytes(); err == nil {
@@ -173,6 +189,15 @@ func (v *redisLoadBalancer) Pick(ctx context.Context, streamURL string) (*Origin
 	var server OriginServer
 	for i := 0; i < 3; i++ {
 		tryServerKey := serverKeys[rand.Intn(len(serverKeys))]
+		
+		// Skip the excluded server.
+		if excludeServerID != "" {
+			expectedKey := v.redisKeyServer(excludeServerID)
+			if tryServerKey == expectedKey {
+				continue
+			}
+		}
+		
 		b, err := v.rdb.Get(ctx, tryServerKey).Bytes()
 		if err == nil && len(b) > 0 {
 			if err := json.Unmarshal(b, &server); err != nil {
