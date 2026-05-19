@@ -217,6 +217,16 @@ type FakeProxyEnvironment struct {
 	systemAPIReturnsOnCall map[int]struct {
 		result1 string
 	}
+	WebRTCCandidateIPStub        func() string
+	webRTCCandidateIPMutex       sync.RWMutex
+	webRTCCandidateIPArgsForCall []struct {
+	}
+	webRTCCandidateIPReturns struct {
+		result1 string
+	}
+	webRTCCandidateIPReturnsOnCall map[int]struct {
+		result1 string
+	}
 	WebRTCServerStub        func() string
 	webRTCServerMutex       sync.RWMutex
 	webRTCServerArgsForCall []struct {
@@ -1340,6 +1350,59 @@ func (fake *FakeProxyEnvironment) SystemAPIReturnsOnCall(i int, result1 string) 
 		})
 	}
 	fake.systemAPIReturnsOnCall[i] = struct {
+		result1 string
+	}{result1}
+}
+
+func (fake *FakeProxyEnvironment) WebRTCCandidateIP() string {
+	fake.webRTCCandidateIPMutex.Lock()
+	ret, specificReturn := fake.webRTCCandidateIPReturnsOnCall[len(fake.webRTCCandidateIPArgsForCall)]
+	fake.webRTCCandidateIPArgsForCall = append(fake.webRTCCandidateIPArgsForCall, struct {
+	}{})
+	stub := fake.WebRTCCandidateIPStub
+	fakeReturns := fake.webRTCCandidateIPReturns
+	fake.recordInvocation("WebRTCCandidateIP", []interface{}{})
+	fake.webRTCCandidateIPMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeProxyEnvironment) WebRTCCandidateIPCallCount() int {
+	fake.webRTCCandidateIPMutex.RLock()
+	defer fake.webRTCCandidateIPMutex.RUnlock()
+	return len(fake.webRTCCandidateIPArgsForCall)
+}
+
+func (fake *FakeProxyEnvironment) WebRTCCandidateIPCalls(stub func() string) {
+	fake.webRTCCandidateIPMutex.Lock()
+	defer fake.webRTCCandidateIPMutex.Unlock()
+	fake.WebRTCCandidateIPStub = stub
+}
+
+func (fake *FakeProxyEnvironment) WebRTCCandidateIPReturns(result1 string) {
+	fake.webRTCCandidateIPMutex.Lock()
+	defer fake.webRTCCandidateIPMutex.Unlock()
+	fake.WebRTCCandidateIPStub = nil
+	fake.webRTCCandidateIPReturns = struct {
+		result1 string
+	}{result1}
+}
+
+func (fake *FakeProxyEnvironment) WebRTCCandidateIPReturnsOnCall(i int, result1 string) {
+	fake.webRTCCandidateIPMutex.Lock()
+	defer fake.webRTCCandidateIPMutex.Unlock()
+	fake.WebRTCCandidateIPStub = nil
+	if fake.webRTCCandidateIPReturnsOnCall == nil {
+		fake.webRTCCandidateIPReturnsOnCall = make(map[int]struct {
+			result1 string
+		})
+	}
+	fake.webRTCCandidateIPReturnsOnCall[i] = struct {
 		result1 string
 	}{result1}
 }

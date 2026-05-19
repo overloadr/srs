@@ -22,6 +22,21 @@ type FakeOriginService struct {
 		result1 *lb.OriginServer
 		result2 error
 	}
+	RepickStub        func(context.Context, string, string) (*lb.OriginServer, error)
+	repickMutex       sync.RWMutex
+	repickArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 string
+	}
+	repickReturns struct {
+		result1 *lb.OriginServer
+		result2 error
+	}
+	repickReturnsOnCall map[int]struct {
+		result1 *lb.OriginServer
+		result2 error
+	}
 	UpdateStub        func(context.Context, *lb.OriginServer) error
 	updateMutex       sync.RWMutex
 	updateArgsForCall []struct {
@@ -98,6 +113,72 @@ func (fake *FakeOriginService) PickReturnsOnCall(i int, result1 *lb.OriginServer
 		})
 	}
 	fake.pickReturnsOnCall[i] = struct {
+		result1 *lb.OriginServer
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeOriginService) Repick(arg1 context.Context, arg2 string, arg3 string) (*lb.OriginServer, error) {
+	fake.repickMutex.Lock()
+	ret, specificReturn := fake.repickReturnsOnCall[len(fake.repickArgsForCall)]
+	fake.repickArgsForCall = append(fake.repickArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 string
+	}{arg1, arg2, arg3})
+	stub := fake.RepickStub
+	fakeReturns := fake.repickReturns
+	fake.recordInvocation("Repick", []interface{}{arg1, arg2, arg3})
+	fake.repickMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeOriginService) RepickCallCount() int {
+	fake.repickMutex.RLock()
+	defer fake.repickMutex.RUnlock()
+	return len(fake.repickArgsForCall)
+}
+
+func (fake *FakeOriginService) RepickCalls(stub func(context.Context, string, string) (*lb.OriginServer, error)) {
+	fake.repickMutex.Lock()
+	defer fake.repickMutex.Unlock()
+	fake.RepickStub = stub
+}
+
+func (fake *FakeOriginService) RepickArgsForCall(i int) (context.Context, string, string) {
+	fake.repickMutex.RLock()
+	defer fake.repickMutex.RUnlock()
+	argsForCall := fake.repickArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeOriginService) RepickReturns(result1 *lb.OriginServer, result2 error) {
+	fake.repickMutex.Lock()
+	defer fake.repickMutex.Unlock()
+	fake.RepickStub = nil
+	fake.repickReturns = struct {
+		result1 *lb.OriginServer
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeOriginService) RepickReturnsOnCall(i int, result1 *lb.OriginServer, result2 error) {
+	fake.repickMutex.Lock()
+	defer fake.repickMutex.Unlock()
+	fake.RepickStub = nil
+	if fake.repickReturnsOnCall == nil {
+		fake.repickReturnsOnCall = make(map[int]struct {
+			result1 *lb.OriginServer
+			result2 error
+		})
+	}
+	fake.repickReturnsOnCall[i] = struct {
 		result1 *lb.OriginServer
 		result2 error
 	}{result1, result2}
