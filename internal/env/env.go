@@ -41,6 +41,8 @@ type ProxyEnvironment interface {
 	RtmpServer() string
 	// WebRTC media server port (UDP)
 	WebRTCServer() string
+	// WebRTC candidate IP for ICE, used in SDP answer
+	WebRTCCandidateIP() string
 	// SRT media server port (UDP)
 	SRTServer() string
 	// System API server port
@@ -110,6 +112,10 @@ func (e *proxyEnvironment) RtmpServer() string {
 
 func (e *proxyEnvironment) WebRTCServer() string {
 	return getEnv("PROXY_WEBRTC_SERVER")
+}
+
+func (e *proxyEnvironment) WebRTCCandidateIP() string {
+	return getEnv("PROXY_WEBRTC_CANDIDATE_IP")
 }
 
 func (e *proxyEnvironment) SRTServer() string {
@@ -284,6 +290,10 @@ func buildDefaultEnvironmentVariables(ctx context.Context) {
 	setEnvDefault("PROXY_RTMP_SERVER", "11935")
 	// The WebRTC media server, via UDP protocol.
 	setEnvDefault("PROXY_WEBRTC_SERVER", "18000")
+	// The WebRTC candidate IP for ICE, used in SDP answer. If empty, the backend's
+	// candidate IP will be used. For multi-proxy cluster with Redis, this should be
+	// set to the proxy's public IP so clients connect to the proxy instead of backend.
+	setEnvDefault("PROXY_WEBRTC_CANDIDATE_IP", "")
 	// The SRT media server, via UDP protocol.
 	setEnvDefault("PROXY_SRT_SERVER", "20080")
 	// The API server of proxy itself.
@@ -318,7 +328,7 @@ func buildDefaultEnvironmentVariables(ctx context.Context) {
 	logger.Debug(ctx, "load .env as GO_PPROF=%v, "+
 		"PROXY_FORCE_QUIT_TIMEOUT=%v, PROXY_GRACE_QUIT_TIMEOUT=%v, "+
 		"PROXY_HTTP_API=%v, PROXY_HTTP_SERVER=%v, PROXY_RTMP_SERVER=%v, "+
-		"PROXY_WEBRTC_SERVER=%v, PROXY_SRT_SERVER=%v, "+
+		"PROXY_WEBRTC_SERVER=%v, PROXY_WEBRTC_CANDIDATE_IP=%v, PROXY_SRT_SERVER=%v, "+
 		"PROXY_SYSTEM_API=%v, PROXY_STATIC_FILES=%v, PROXY_DEFAULT_BACKEND_ENABLED=%v, "+
 		"PROXY_DEFAULT_BACKEND_IP=%v, PROXY_DEFAULT_BACKEND_RTMP=%v, "+
 		"PROXY_DEFAULT_BACKEND_HTTP=%v, PROXY_DEFAULT_BACKEND_API=%v, "+
@@ -328,7 +338,7 @@ func buildDefaultEnvironmentVariables(ctx context.Context) {
 		getEnv("GO_PPROF"),
 		getEnv("PROXY_FORCE_QUIT_TIMEOUT"), getEnv("PROXY_GRACE_QUIT_TIMEOUT"),
 		getEnv("PROXY_HTTP_API"), getEnv("PROXY_HTTP_SERVER"), getEnv("PROXY_RTMP_SERVER"),
-		getEnv("PROXY_WEBRTC_SERVER"), getEnv("PROXY_SRT_SERVER"),
+		getEnv("PROXY_WEBRTC_SERVER"), getEnv("PROXY_WEBRTC_CANDIDATE_IP"), getEnv("PROXY_SRT_SERVER"),
 		getEnv("PROXY_SYSTEM_API"), getEnv("PROXY_STATIC_FILES"), getEnv("PROXY_DEFAULT_BACKEND_ENABLED"),
 		getEnv("PROXY_DEFAULT_BACKEND_IP"), getEnv("PROXY_DEFAULT_BACKEND_RTMP"),
 		getEnv("PROXY_DEFAULT_BACKEND_HTTP"), getEnv("PROXY_DEFAULT_BACKEND_API"),

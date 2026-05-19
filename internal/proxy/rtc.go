@@ -229,17 +229,29 @@ func (v *webRTCProxyServer) proxyApiToBackend(
 		return errors.Wrapf(err, "read stream from %v", backendURL)
 	}
 
-	// Replace the WebRTC UDP port in answer.
+	// Replace the WebRTC candidate IP and UDP port in answer.
+	// The candidate line format is: a=candidate:... <ip> <port> typ host
+	// We need to replace both the backend IP and port with proxy's IP and port.
 	localSDPAnswer := string(b)
+	candidateIP := v.environment.WebRTCCandidateIP()
+	candidatePort := v.environment.WebRTCServer()
 	for _, endpoint := range backend.RTC {
 		_, _, port, err := utils.ParseListenEndpoint(endpoint)
 		if err != nil {
 			return errors.Wrapf(err, "parse endpoint %v", endpoint)
 		}
 
-		from := fmt.Sprintf(" %v typ host", port)
-		to := fmt.Sprintf(" %v typ host", v.environment.WebRTCServer())
-		localSDPAnswer = strings.Replace(localSDPAnswer, from, to, -1)
+		// Replace backend IP and port with proxy's candidate IP and port.
+		// If candidateIP is not configured, only replace the port (backward compatible).
+		if candidateIP != "" {
+			from := fmt.Sprintf(" %v %v typ host", backend.IP, port)
+			to := fmt.Sprintf(" %v %v typ host", candidateIP, candidatePort)
+			localSDPAnswer = strings.Replace(localSDPAnswer, from, to, -1)
+		} else {
+			from := fmt.Sprintf(" %v typ host", port)
+			to := fmt.Sprintf(" %v typ host", candidatePort)
+			localSDPAnswer = strings.Replace(localSDPAnswer, from, to, -1)
+		}
 	}
 
 	// Fetch the ice-ufrag and ice-pwd from local SDP answer. The legacy SRS
