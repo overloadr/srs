@@ -86,27 +86,38 @@ func ParseBody(r io.ReadCloser, v interface{}) error {
 	return nil
 }
 
-// BuildStreamURL build as vhost/app/stream for stream URL r.
+// BuildStreamURL builds the canonical stream key for proxy load balancing: __defaultVhost__/app/stream.
+//
+// Hostname, port, and scheme are ignored so publishers and players agree on the same key when they use
+// different domains, IPs, or mixed access (the logical stream is identified only by path / app+stream).
 func BuildStreamURL(r string) (string, error) {
 	u, err := url.Parse(r)
 	if err != nil {
 		return "", errors.Wrapf(err, "parse url %v", r)
 	}
 
-	// If not domain or ip in hostname, it's __defaultVhost__.
-	defaultVhost := !strings.Contains(u.Hostname(), ".")
-
-	// If hostname is actually an IP address, it's __defaultVhost__.
-	if ip := net.ParseIP(u.Hostname()); ip.To4() != nil {
-		defaultVhost = true
+	// Clean the path to remove duplicate slashes and normalize the path.
+	// For example, "/live//test/123" becomes "/live/test/123".
+	cleanPath := path.Clean(u.Path)
+	// path.Clean removes trailing slash and may return "." for empty path,
+	// we need to ensure it starts with "/" for non-empty paths.
+	if cleanPath == "." {
+		cleanPath = "/"
+	} else if !strings.HasPrefix(cleanPath, "/") {
+		cleanPath = "/" + cleanPath
 	}
 
-	if defaultVhost {
-		return fmt.Sprintf("__defaultVhost__%v", u.Path), nil
+	// Remove common streaming extensions from the path to normalize stream URLs.
+	// This ensures that "live/test.flv" and "live/test" map to the same stream.
+	// Supported extensions: .flv, .m3u8, .ts, .mp4, .aac, .mp3
+	for _, ext := range []string{".flv", ".m3u8", ".ts", ".mp4", ".aac", ".mp3"} {
+		if strings.HasSuffix(cleanPath, ext) {
+			cleanPath = strings.TrimSuffix(cleanPath, ext)
+			break
+		}
 	}
 
-	// Ignore port, only use hostname as vhost.
-	return fmt.Sprintf("%v%v", u.Hostname(), u.Path), nil
+	return fmt.Sprintf("__defaultVhost__%v", cleanPath), nil
 }
 
 // IsPeerClosedError indicates whether peer object closed the connection.

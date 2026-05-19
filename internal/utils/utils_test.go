@@ -136,11 +136,14 @@ func TestBuildStreamURL(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"rtmp://example.com/live/stream", "example.com/live/stream"},
-		{"rtmp://example.com:1935/live/stream", "example.com/live/stream"},
+		{"rtmp://example.com/live/stream", "__defaultVhost__/live/stream"},
+		{"rtmp://example.com:1935/live/stream", "__defaultVhost__/live/stream"},
 		{"rtmp://127.0.0.1/live/stream", "__defaultVhost__/live/stream"},
 		{"rtmp://localhost/live/stream", "__defaultVhost__/live/stream"},
 		{"rtmp://localhost:1935/live/stream", "__defaultVhost__/live/stream"},
+		{"http://push.example.com:8080/live/stream.flv", "__defaultVhost__/live/stream"},
+		{"http://192.168.0.1/live/stream.m3u8", "__defaultVhost__/live/stream"},
+		{"https://play.other.net/live/stream", "__defaultVhost__/live/stream"},
 	}
 	for _, c := range cases {
 		got, err := BuildStreamURL(c.in)
