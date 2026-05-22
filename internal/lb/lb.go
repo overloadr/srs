@@ -6,6 +6,7 @@ package lb
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 )
@@ -87,6 +88,31 @@ func (v *OriginServer) Format(f fmt.State, c rune) {
 	}
 }
 
+// FirstAPIPort returns the first HTTP API listen port as a decimal string, or empty.
+func (v *OriginServer) FirstAPIPort() string {
+	if v == nil || len(v.API) == 0 {
+		return ""
+	}
+	ep := v.API[0]
+	if !strings.Contains(ep, ":") {
+		return ep
+	}
+	if strings.Contains(ep, "://") {
+		parts := strings.SplitN(ep, "://", 2)
+		if len(parts) == 2 {
+			ep = parts[1]
+		}
+	}
+	if host, portStr, err := net.SplitHostPort(ep); err == nil && portStr != "" {
+		_ = host
+		return portStr
+	}
+	if i := strings.LastIndex(ep, ":"); i >= 0 && i < len(ep)-1 {
+		return ep[i+1:]
+	}
+	return ""
+}
+
 func NewOriginServer(opts ...func(*OriginServer)) *OriginServer {
 	v := &OriginServer{}
 	for _, opt := range opts {
@@ -109,10 +135,17 @@ type RTCConnection interface {
 	GetUfrag() string
 }
 
+// IsOriginServerAlive reports whether the server heartbeat is within ServerAliveDuration.
+func IsOriginServerAlive(server *OriginServer) bool {
+	return server != nil && time.Since(server.UpdatedAt) < ServerAliveDuration
+}
+
 // OriginService is the interface for origin-server registry and stream routing.
 type OriginService interface {
 	// Update records the latest registration or heartbeat for an origin server.
 	Update(ctx context.Context, server *OriginServer) error
+	// List returns all registered origin servers (alive and stale).
+	List(ctx context.Context) ([]*OriginServer, error)
 	// Pick a backend server for the specified stream URL.
 	Pick(ctx context.Context, streamURL string) (*OriginServer, error)
 	// Repick clears the current mapping for the stream URL and picks a new backend server.

@@ -19,6 +19,19 @@ type FakeOriginLoadBalancer struct {
 	initializeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ListStub        func(context.Context) ([]*lb.OriginServer, error)
+	listMutex       sync.RWMutex
+	listArgsForCall []struct {
+		arg1 context.Context
+	}
+	listReturns struct {
+		result1 []*lb.OriginServer
+		result2 error
+	}
+	listReturnsOnCall map[int]struct {
+		result1 []*lb.OriginServer
+		result2 error
+	}
 	LoadHLSBySPBHIDStub        func(context.Context, string) (lb.HLSPlayStream, error)
 	loadHLSBySPBHIDMutex       sync.RWMutex
 	loadHLSBySPBHIDArgsForCall []struct {
@@ -179,6 +192,70 @@ func (fake *FakeOriginLoadBalancer) InitializeReturnsOnCall(i int, result1 error
 	fake.initializeReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeOriginLoadBalancer) List(arg1 context.Context) ([]*lb.OriginServer, error) {
+	fake.listMutex.Lock()
+	ret, specificReturn := fake.listReturnsOnCall[len(fake.listArgsForCall)]
+	fake.listArgsForCall = append(fake.listArgsForCall, struct {
+		arg1 context.Context
+	}{arg1})
+	stub := fake.ListStub
+	fakeReturns := fake.listReturns
+	fake.recordInvocation("List", []interface{}{arg1})
+	fake.listMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeOriginLoadBalancer) ListCallCount() int {
+	fake.listMutex.RLock()
+	defer fake.listMutex.RUnlock()
+	return len(fake.listArgsForCall)
+}
+
+func (fake *FakeOriginLoadBalancer) ListCalls(stub func(context.Context) ([]*lb.OriginServer, error)) {
+	fake.listMutex.Lock()
+	defer fake.listMutex.Unlock()
+	fake.ListStub = stub
+}
+
+func (fake *FakeOriginLoadBalancer) ListArgsForCall(i int) context.Context {
+	fake.listMutex.RLock()
+	defer fake.listMutex.RUnlock()
+	argsForCall := fake.listArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeOriginLoadBalancer) ListReturns(result1 []*lb.OriginServer, result2 error) {
+	fake.listMutex.Lock()
+	defer fake.listMutex.Unlock()
+	fake.ListStub = nil
+	fake.listReturns = struct {
+		result1 []*lb.OriginServer
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeOriginLoadBalancer) ListReturnsOnCall(i int, result1 []*lb.OriginServer, result2 error) {
+	fake.listMutex.Lock()
+	defer fake.listMutex.Unlock()
+	fake.ListStub = nil
+	if fake.listReturnsOnCall == nil {
+		fake.listReturnsOnCall = make(map[int]struct {
+			result1 []*lb.OriginServer
+			result2 error
+		})
+	}
+	fake.listReturnsOnCall[i] = struct {
+		result1 []*lb.OriginServer
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeOriginLoadBalancer) LoadHLSBySPBHID(arg1 context.Context, arg2 string) (lb.HLSPlayStream, error) {

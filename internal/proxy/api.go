@@ -335,6 +335,21 @@ func (v *systemAPI) Run(ctx context.Context) error {
 		})
 	})
 
+	// Proxy load and registered backend SRS nodes.
+	logger.Debug(ctx, "Handle /api/v1/proxy/status by %v", addr)
+	mux.HandleFunc("/api/v1/proxy/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			utils.ApiError(ctx, w, r, errors.Errorf("method %v not allowed", r.Method))
+			return
+		}
+		resp, err := buildProxyStatus(ctx, v.environment, v.loadBalancer)
+		if err != nil {
+			utils.ApiError(ctx, w, r, err)
+			return
+		}
+		utils.ApiResponse(ctx, w, r, resp)
+	})
+
 	// Run System API server.
 	v.wg.Add(1)
 	go func() {

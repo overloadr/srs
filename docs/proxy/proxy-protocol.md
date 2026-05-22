@@ -117,3 +117,19 @@ There are three ways to register backend servers to the proxy:
    - No backend server configuration needed
    - Use for development, testing, and debugging
    - See "Default Backend Server (For Debugging)" section above
+
+## Proxy Status API
+
+Query proxy host load and all registered backend SRS nodes on the **System API** (default port `12025`):
+
+```bash
+curl http://127.0.0.1:12025/api/v1/proxy/status
+```
+
+Response fields:
+
+* `data.proxy.stats`: Host metrics (CPU, memory, swap, load average, disk usage, network I/O totals and per-interface counters, proxy process memory).
+* `data.proxy.load_balancer`: `memory` or `redis`, same as `PROXY_LOAD_BALANCER_TYPE`.
+* `data.backends[]`: Each registered SRS node with `device_id`, `ip`, `api_port` (first `api` listen port), full `api` list, `alive` (heartbeat within 300s), and SRS ids.
+
+Works with both in-memory and Redis load balancer backends.

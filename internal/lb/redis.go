@@ -137,6 +137,29 @@ func (v *redisLoadBalancer) Update(ctx context.Context, server *OriginServer) er
 	return nil
 }
 
+func (v *redisLoadBalancer) List(ctx context.Context) ([]*OriginServer, error) {
+	var serverKeys []string
+	if b, err := v.rdb.Get(ctx, v.redisKeyServers()).Bytes(); err == nil {
+		if err := json.Unmarshal(b, &serverKeys); err != nil {
+			return nil, errors.Wrapf(err, "unmarshal key=%v servers %v", v.redisKeyServers(), string(b))
+		}
+	}
+
+	var servers []*OriginServer
+	for i := len(serverKeys) - 1; i >= 0; i-- {
+		b, err := v.rdb.Get(ctx, serverKeys[i]).Bytes()
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		var server OriginServer
+		if err := json.Unmarshal(b, &server); err != nil {
+			return nil, errors.Wrapf(err, "unmarshal key=%v server %v", serverKeys[i], string(b))
+		}
+		servers = append(servers, &server)
+	}
+	return servers, nil
+}
+
 func (v *redisLoadBalancer) Pick(ctx context.Context, streamURL string) (*OriginServer, error) {
 	key := fmt.Sprintf("srs-proxy-url:%v", streamURL)
 

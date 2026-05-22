@@ -85,6 +85,15 @@ func (v *memoryLoadBalancer) Update(ctx context.Context, server *OriginServer) e
 	return nil
 }
 
+func (v *memoryLoadBalancer) List(ctx context.Context) ([]*OriginServer, error) {
+	var servers []*OriginServer
+	v.servers.Range(func(key string, server *OriginServer) bool {
+		servers = append(servers, server)
+		return true
+	})
+	return servers, nil
+}
+
 func (v *memoryLoadBalancer) Pick(ctx context.Context, streamURL string) (*OriginServer, error) {
 	// Always proxy to the same server for the same stream URL.
 	if server, ok := v.picked.Load(streamURL); ok {

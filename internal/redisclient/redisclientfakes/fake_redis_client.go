@@ -11,6 +11,18 @@ import (
 )
 
 type FakeRedisClient struct {
+	DelStub        func(context.Context, ...string) *redis.IntCmd
+	delMutex       sync.RWMutex
+	delArgsForCall []struct {
+		arg1 context.Context
+		arg2 []string
+	}
+	delReturns struct {
+		result1 *redis.IntCmd
+	}
+	delReturnsOnCall map[int]struct {
+		result1 *redis.IntCmd
+	}
 	GetStub        func(context.Context, string) *redis.StringCmd
 	getMutex       sync.RWMutex
 	getArgsForCall []struct {
@@ -60,6 +72,68 @@ type FakeRedisClient struct {
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
+}
+
+func (fake *FakeRedisClient) Del(arg1 context.Context, arg2 ...string) *redis.IntCmd {
+	fake.delMutex.Lock()
+	ret, specificReturn := fake.delReturnsOnCall[len(fake.delArgsForCall)]
+	fake.delArgsForCall = append(fake.delArgsForCall, struct {
+		arg1 context.Context
+		arg2 []string
+	}{arg1, arg2})
+	stub := fake.DelStub
+	fakeReturns := fake.delReturns
+	fake.recordInvocation("Del", []interface{}{arg1, arg2})
+	fake.delMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2...)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeRedisClient) DelCallCount() int {
+	fake.delMutex.RLock()
+	defer fake.delMutex.RUnlock()
+	return len(fake.delArgsForCall)
+}
+
+func (fake *FakeRedisClient) DelCalls(stub func(context.Context, ...string) *redis.IntCmd) {
+	fake.delMutex.Lock()
+	defer fake.delMutex.Unlock()
+	fake.DelStub = stub
+}
+
+func (fake *FakeRedisClient) DelArgsForCall(i int) (context.Context, []string) {
+	fake.delMutex.RLock()
+	defer fake.delMutex.RUnlock()
+	argsForCall := fake.delArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeRedisClient) DelReturns(result1 *redis.IntCmd) {
+	fake.delMutex.Lock()
+	defer fake.delMutex.Unlock()
+	fake.DelStub = nil
+	fake.delReturns = struct {
+		result1 *redis.IntCmd
+	}{result1}
+}
+
+func (fake *FakeRedisClient) DelReturnsOnCall(i int, result1 *redis.IntCmd) {
+	fake.delMutex.Lock()
+	defer fake.delMutex.Unlock()
+	fake.DelStub = nil
+	if fake.delReturnsOnCall == nil {
+		fake.delReturnsOnCall = make(map[int]struct {
+			result1 *redis.IntCmd
+		})
+	}
+	fake.delReturnsOnCall[i] = struct {
+		result1 *redis.IntCmd
+	}{result1}
 }
 
 func (fake *FakeRedisClient) Get(arg1 context.Context, arg2 string) *redis.StringCmd {

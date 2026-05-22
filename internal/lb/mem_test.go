@@ -261,3 +261,32 @@ func TestMemLB_LoadWebRTCByUfrag_NotFound(t *testing.T) {
 		t.Fatalf("expected error, got %v", err)
 	}
 }
+
+func TestMemLB_List(t *testing.T) {
+	lb := newMem()
+	ctx := context.Background()
+	s1 := NewOriginServer(func(s *OriginServer) {
+		s.IP, s.ServerID, s.ServiceID, s.PID = "1.1.1.1", "a", "b", "1"
+		s.RTMP = []string{"1935"}
+		s.UpdatedAt = time.Now()
+	})
+	s2 := NewOriginServer(func(s *OriginServer) {
+		s.IP, s.ServerID, s.ServiceID, s.PID = "2.2.2.2", "c", "d", "2"
+		s.RTMP = []string{"1935"}
+		s.UpdatedAt = time.Now()
+	})
+	if err := lb.Update(ctx, s1); err != nil {
+		t.Fatalf("Update s1: %v", err)
+	}
+	if err := lb.Update(ctx, s2); err != nil {
+		t.Fatalf("Update s2: %v", err)
+	}
+
+	servers, err := lb.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("List len = %d, want 2", len(servers))
+	}
+}

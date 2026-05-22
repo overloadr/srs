@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"srsx/internal/env/envfakes"
+	"srsx/internal/lb"
 	"srsx/internal/lb/lbfakes"
 )
 
@@ -888,5 +889,70 @@ func TestSystemAPI_Run_HandlerRegisterLoadBalancerUpdateError(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte("lb-update-fail")) {
 		t.Errorf("body = %q, expected lb error", rec.Body.String())
+	}
+}
+
+func TestSystemAPI_Run_HandlerProxyStatus(t *testing.T) {
+	env := &envfakes.FakeProxyEnvironment{}
+	env.SystemAPIReturns(":0")
+	env.LoadBalancerTypeReturns("memory")
+	lbFake := &lbfakes.FakeOriginLoadBalancer{}
+	backend := lb.NewOriginServer(func(s *lb.OriginServer) {
+		s.DeviceID = "origin1"
+		s.IP = "10.0.0.8"
+		s.ServerID, s.ServiceID, s.PID = "srv", "svc", "99"
+		s.API = []string{"19853"}
+		s.RTMP = []string{"1935"}
+		s.UpdatedAt = time.Now()
+	})
+	lbFake.ListReturns([]*lb.OriginServer{backend}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mux, _, _ := captureMuxFromSystemAPIRun(t, env, lbFake, ctx)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/proxy/status", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			Proxy struct {
+				Stats struct {
+					CPU struct {
+						LogicalCount int `json:"logical_count"`
+					} `json:"cpu"`
+				} `json:"stats"`
+			} `json:"proxy"`
+			Backends []struct {
+				DeviceID string `json:"device_id"`
+				IP       string `json:"ip"`
+				APIPort  string `json:"api_port"`
+				Alive    bool   `json:"alive"`
+			} `json:"backends"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json: %v\nbody=%s", err, rec.Body.String())
+	}
+	if body.Code != 0 {
+		t.Fatalf("code = %d, want 0", body.Code)
+	}
+	if body.Data.Proxy.Stats.CPU.LogicalCount <= 0 {
+		t.Error("cpu.logical_count should be > 0")
+	}
+	if len(body.Data.Backends) != 1 {
+		t.Fatalf("backends len = %d, want 1", len(body.Data.Backends))
+	}
+	b := body.Data.Backends[0]
+	if b.DeviceID != "origin1" || b.IP != "10.0.0.8" || b.APIPort != "19853" || !b.Alive {
+		t.Fatalf("backend = %+v", b)
+	}
+	if lbFake.ListCallCount() != 1 {
+		t.Fatalf("List calls = %d, want 1", lbFake.ListCallCount())
 	}
 }

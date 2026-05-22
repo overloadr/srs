@@ -139,3 +139,37 @@ func TestNewOriginServer(t *testing.T) {
 		}
 	})
 }
+
+func TestOriginServerFirstAPIPort(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		api  []string
+		want string
+	}{
+		{"plain port", []string{"1985"}, "1985"},
+		{"host port", []string{":19853"}, "19853"},
+		{"url form", []string{"tcp://0.0.0.0:1985"}, "1985"},
+		{"empty", nil, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			v := &OriginServer{API: tt.api}
+			if got := v.FirstAPIPort(); got != tt.want {
+				t.Fatalf("FirstAPIPort()=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsOriginServerAlive(t *testing.T) {
+	alive := &OriginServer{UpdatedAt: time.Now()}
+	stale := &OriginServer{UpdatedAt: time.Now().Add(-ServerAliveDuration - time.Second)}
+	if !IsOriginServerAlive(alive) {
+		t.Fatal("expected alive")
+	}
+	if IsOriginServerAlive(stale) {
+		t.Fatal("expected stale")
+	}
+	if IsOriginServerAlive(nil) {
+		t.Fatal("nil should not be alive")
+	}
+}
