@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
@@ -25,7 +24,6 @@ type Snapshot struct {
 	Memory      MemoryInfo     `json:"memory"`
 	Swap        SwapInfo       `json:"swap"`
 	Load        LoadInfo       `json:"load"`
-	Disk        []DiskInfo     `json:"disk,omitempty"`
 	Network     NetworkInfo    `json:"network"`
 	Process     ProcessInfo    `json:"process"`
 }
@@ -66,15 +64,6 @@ type LoadInfo struct {
 	Load1  float64 `json:"load1,omitempty"`
 	Load5  float64 `json:"load5,omitempty"`
 	Load15 float64 `json:"load15,omitempty"`
-}
-
-type DiskInfo struct {
-	Mountpoint   string  `json:"mountpoint"`
-	Fstype       string  `json:"fstype,omitempty"`
-	TotalBytes   uint64  `json:"total_bytes"`
-	UsedBytes    uint64  `json:"used_bytes"`
-	FreeBytes    uint64  `json:"free_bytes"`
-	UsedPercent  float64 `json:"used_percent"`
 }
 
 type NetworkInfo struct {
@@ -156,23 +145,6 @@ func Collect(ctx context.Context) *Snapshot {
 
 	if avg, err := load.AvgWithContext(ctx); err == nil {
 		snap.Load = LoadInfo{Load1: avg.Load1, Load5: avg.Load5, Load15: avg.Load15}
-	}
-
-	if parts, err := disk.PartitionsWithContext(ctx, false); err == nil {
-		for _, part := range parts {
-			usage, err := disk.UsageWithContext(ctx, part.Mountpoint)
-			if err != nil {
-				continue
-			}
-			snap.Disk = append(snap.Disk, DiskInfo{
-				Mountpoint:  part.Mountpoint,
-				Fstype:      part.Fstype,
-				TotalBytes:  usage.Total,
-				UsedBytes:   usage.Used,
-				FreeBytes:   usage.Free,
-				UsedPercent: usage.UsedPercent,
-			})
-		}
 	}
 
 	if counters, err := net.IOCountersWithContext(ctx, true); err == nil {
