@@ -259,6 +259,24 @@ func TestConvertURLToStreamURL_TLS(t *testing.T) {
 	}
 }
 
+func TestBackendQueryString(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/live.flv?vhost=foo&spbhid=ABC&token=bar", nil)
+	if got := BackendQueryString(req); got != "token=bar&vhost=foo" && got != "vhost=foo&token=bar" {
+		t.Fatalf("BackendQueryString = %q", got)
+	}
+	if got := BackendQueryString(httptest.NewRequest(http.MethodGet, "http://example.com/live.flv?spbhid=ABC", nil)); got != "" {
+		t.Fatalf("proxy-only query should be empty, got %q", got)
+	}
+}
+
+func TestAppendBackendQuery(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/live.flv?vhost=foo", nil)
+	got := AppendBackendQuery("http://1.2.3.4:8080/live.flv", req)
+	if got != "http://1.2.3.4:8080/live.flv?vhost=foo" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestRtcIsSTUN(t *testing.T) {
 	cases := []struct {
 		data []byte

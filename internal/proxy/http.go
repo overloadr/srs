@@ -331,7 +331,7 @@ func (v *httpFlvTsConnection) serveByBackend(ctx context.Context, w http.Respons
 	}
 
 	// Connect to backend SRS server via HTTP client.
-	backendURL := v.buildBackendURL(backend.IP, httpPort, r.URL.Path)
+	backendURL := utils.AppendBackendQuery(v.buildBackendURL(backend.IP, httpPort, r.URL.Path), r)
 	req, err := http.NewRequestWithContext(ctx, r.Method, backendURL, nil)
 	if err != nil {
 		return errors.Wrapf(err, "create request to %v", backendURL)
@@ -456,11 +456,7 @@ func (v *hlsPlayStream) serveByBackend(ctx context.Context, w http.ResponseWrite
 	}
 
 	// Connect to backend SRS server via HTTP client.
-	backendURL := v.buildBackendURL(backend.IP, httpPort, r.URL.Path)
-	if r.URL.RawQuery != "" {
-		backendURL += "?" + r.URL.RawQuery
-	}
-
+	backendURL := utils.AppendBackendQuery(v.buildBackendURL(backend.IP, httpPort, r.URL.Path), r)
 	req, err := http.NewRequestWithContext(ctx, r.Method, backendURL, nil)
 	if err != nil {
 		return errors.Wrapf(err, "create request to %v", backendURL)

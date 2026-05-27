@@ -199,6 +199,34 @@ func ConvertURLToStreamURL(r *http.Request) (unifiedURL, fullURL string) {
 	return
 }
 
+// proxyOnlyQueryKeys are query keys used only by srs-proxy and must not be sent to SRS origins.
+var proxyOnlyQueryKeys = []string{"spbhid"}
+
+// BackendQueryString returns the query string to forward to an SRS origin, omitting
+// proxy-internal keys such as spbhid.
+func BackendQueryString(r *http.Request) string {
+	if r == nil || r.URL.RawQuery == "" {
+		return ""
+	}
+
+	q := r.URL.Query()
+	for _, key := range proxyOnlyQueryKeys {
+		q.Del(key)
+	}
+	if len(q) == 0 {
+		return ""
+	}
+	return q.Encode()
+}
+
+// AppendBackendQuery appends the client request query string to backendURL when present.
+func AppendBackendQuery(backendURL string, r *http.Request) string {
+	if qs := BackendQueryString(r); qs != "" {
+		return backendURL + "?" + qs
+	}
+	return backendURL
+}
+
 // RtcIsSTUN returns true if data of UDP payload is a STUN packet.
 func RtcIsSTUN(data []byte) bool {
 	return len(data) > 0 && (data[0] == 0 || data[0] == 1)

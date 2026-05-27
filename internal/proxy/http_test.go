@@ -622,26 +622,53 @@ func TestHTTPFlvTsConn_ServeByBackend_BodyPassthrough(t *testing.T) {
 	}
 }
 
-func TestHTTPFlvTsConn_ServeByBackend_DropsRawQuery(t *testing.T) {
-	// Unlike hlsPlayStream.serveByBackend, the FLV/TS path forwards only
-	// r.URL.Path — it does NOT append RawQuery to the backend request.
-	var seenRawQuery string
+func TestHTTPFlvTsConn_ServeByBackend_AppendsRawQuery(t *testing.T) {
+	var seenURL, seenHost string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenRawQuery = r.URL.RawQuery
+		seenURL = r.URL.String()
+		seenHost = r.Host
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
 	host, port := httptestHostPort(t, ts)
 
 	v := newHTTPFlvTsConnection()
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/live.flv?token=foo", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/live.flv?vhost=my.vhost.com&token=foo", nil)
 	rec := httptest.NewRecorder()
 	if err := v.serveByBackend(context.Background(), rec, req,
 		&lb.OriginServer{IP: host, HTTP: []string{port}}); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if seenRawQuery != "" {
-		t.Fatalf("backend should NOT see raw query, got %q", seenRawQuery)
+	if !strings.Contains(seenURL, "vhost=my.vhost.com") || !strings.Contains(seenURL, "token=foo") {
+		t.Fatalf("backend should see raw query, got %q", seenURL)
+	}
+	// Host must stay the backend address (like a browser hitting the origin IP), not vhost name.
+	if seenHost != host+":"+port {
+		t.Fatalf("backend Host = %q, want %s:%s", seenHost, host, port)
+	}
+}
+
+func TestHTTPFlvTsConn_ServeByBackend_OmitsProxyOnlyQuery(t *testing.T) {
+	var seenURL string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenURL = r.URL.String()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	host, port := httptestHostPort(t, ts)
+
+	v := newHTTPFlvTsConnection()
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/live.flv?spbhid=ABC&token=foo", nil)
+	rec := httptest.NewRecorder()
+	if err := v.serveByBackend(context.Background(), rec, req,
+		&lb.OriginServer{IP: host, HTTP: []string{port}}); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if strings.Contains(seenURL, "spbhid=") {
+		t.Fatalf("backend should not see spbhid, got %q", seenURL)
+	}
+	if !strings.Contains(seenURL, "token=foo") {
+		t.Fatalf("backend should see token, got %q", seenURL)
 	}
 }
 
