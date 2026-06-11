@@ -326,15 +326,15 @@ func TestAmf0EcmaArray(t *testing.T) {
 
 func TestAmf0StrictArray(t *testing.T) {
 	array := NewAmf0StrictArray().
-		Set("name", NewAmf0String("stream")).
-		Set("code", NewAmf0Number(100))
-	array.(*amf0StrictArray).count = 2
+		Append(NewAmf0String("hvc1")).
+		Append(NewAmf0String("av01")).
+		Append(NewAmf0String("vp09"))
 
 	if array.(*amf0StrictArray).amf0Marker() != amf0MarkerStrictArray || array.Size() == 0 {
 		t.Fatalf("unexpected strict array metadata")
 	}
-	if array.Get("missing") != nil {
-		t.Fatal("missing property should be nil")
+	if array.Len() != 3 || array.At(-1) != nil || array.At(3) != nil {
+		t.Fatalf("unexpected strict array length or bounds")
 	}
 
 	b, err := array.MarshalBinary()
@@ -346,11 +346,13 @@ func TestAmf0StrictArray(t *testing.T) {
 	if err := decoded.UnmarshalBinary(b); err != nil {
 		t.Fatalf("UnmarshalBinary() err=%v", err)
 	}
-	if got := NewAmf0Converter(decoded.Get("name")).ToString().String(); got != "stream" {
-		t.Fatalf("name=%v", got)
+	if decoded.Len() != 3 {
+		t.Fatalf("Len()=%v", decoded.Len())
 	}
-	if got := NewAmf0Converter(decoded.Get("code")).ToNumber().Float64(); got != 100 {
-		t.Fatalf("code=%v", got)
+	for i, want := range []string{"hvc1", "av01", "vp09"} {
+		if got := NewAmf0Converter(decoded.At(i)).ToString().String(); got != want {
+			t.Fatalf("element %v=%v, want %v", i, got, want)
+		}
 	}
 
 	empty := append([]byte{byte(amf0MarkerStrictArray)}, 0, 0, 0, 0)
@@ -476,8 +478,7 @@ func TestAmf0MarshalErrors(t *testing.T) {
 			case Amf0EcmaArray:
 				v.Set("name", NewAmf0String("stream"))
 			case Amf0StrictArray:
-				v.Set("name", NewAmf0String("stream"))
-				v.(*amf0StrictArray).count = 1
+				v.Append(NewAmf0String("stream"))
 			}
 			if _, err := value.MarshalBinary(); err == nil {
 				t.Fatal("MarshalBinary() should fail")
@@ -492,9 +493,7 @@ func TestAmf0MarshalErrors(t *testing.T) {
 		{"object", func() Amf0Any { return NewAmf0Object().Set("bad", &errorAmf0Any{}) }},
 		{"ecma-array", func() Amf0Any { return NewAmf0EcmaArray().Set("bad", &errorAmf0Any{}) }},
 		{"strict-array", func() Amf0Any {
-			value := NewAmf0StrictArray().Set("bad", &errorAmf0Any{})
-			value.(*amf0StrictArray).count = 1
-			return value
+			return NewAmf0StrictArray().Append(&errorAmf0Any{})
 		}},
 	} {
 		t.Run(tt.name+" marshal-value", func(t *testing.T) {

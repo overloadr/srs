@@ -944,6 +944,15 @@ func NewMessage() Message {
 	return newMessage()
 }
 
+// NewMessageWithType creates an empty message with the specified type.
+// It is primarily useful for protocol adapters and tests that provide the
+// payload decoding separately.
+func NewMessageWithType(messageType MessageType) Message {
+	v := newMessage()
+	v.messageHeader.MessageType = messageType
+	return v
+}
+
 func newMessage() *message {
 	return &message{}
 }
@@ -1337,6 +1346,17 @@ func (v *CallPacket) ArgsCode() string {
 		if v, ok := v.Args.(Amf0Object); ok {
 			if code, ok := v.Get("code").(Amf0String); ok {
 				return code.String()
+			}
+		}
+	}
+	return ""
+}
+
+func (v *CallPacket) ArgsLevel() string {
+	if v.Args != nil {
+		if v, ok := v.Args.(Amf0Object); ok {
+			if level, ok := v.Get("level").(Amf0String); ok {
+				return level.String()
 			}
 		}
 	}

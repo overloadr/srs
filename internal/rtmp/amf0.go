@@ -712,38 +712,50 @@ func (v *amf0EcmaArray) MarshalBinary() (data []byte, err error) {
 // Amf0StrictArray is the AMF0 strict array type.
 type Amf0StrictArray interface {
 	Amf0Any
-	Get(key string) Amf0Any
-	Set(key string, value Amf0Any) Amf0StrictArray
+	Len() int
+	At(index int) Amf0Any
+	Append(value Amf0Any) Amf0StrictArray
 }
 
 // The AMF0 strict array, please read @doc amf0_spec_121207.pdf, @page 7, @section 2.12 Strict Array Type
 type amf0StrictArray struct {
-	amf0ObjectBase
-	count uint32
+	values     []Amf0Any
+	bufFactory func() amf0Buffer
 }
 
 func NewAmf0StrictArray() Amf0StrictArray {
-	v := &amf0StrictArray{}
-	v.properties = []*amf0Property{}
-	v.bufFactory = defaultBufFactory
-	return v
+	return &amf0StrictArray{
+		values:     []Amf0Any{},
+		bufFactory: defaultBufFactory,
+	}
 }
 
 func (v *amf0StrictArray) amf0Marker() amf0Marker {
 	return amf0MarkerStrictArray
 }
 
-func (v *amf0StrictArray) Get(key string) Amf0Any {
-	return v.amf0ObjectBase.Get(key)
+func (v *amf0StrictArray) Len() int {
+	return len(v.values)
 }
 
-func (v *amf0StrictArray) Set(key string, value Amf0Any) Amf0StrictArray {
-	v.amf0ObjectBase.Set(key, value)
+func (v *amf0StrictArray) At(index int) Amf0Any {
+	if index < 0 || index >= len(v.values) {
+		return nil
+	}
+	return v.values[index]
+}
+
+func (v *amf0StrictArray) Append(value Amf0Any) Amf0StrictArray {
+	v.values = append(v.values, value)
 	return v
 }
 
 func (v *amf0StrictArray) Size() int {
-	return int(1) + 4 + v.amf0ObjectBase.Size()
+	size := 1 + 4
+	for _, value := range v.values {
+		size += value.Size()
+	}
+	return size
 }
 
 func (v *amf0StrictArray) UnmarshalBinary(data []byte) (err error) {
@@ -754,15 +766,21 @@ func (v *amf0StrictArray) UnmarshalBinary(data []byte) (err error) {
 	if m := amf0Marker(p[0]); m != amf0MarkerStrictArray {
 		return errors.Errorf("StrictArray amf0Marker %v is illegal", m)
 	}
-	v.count = binary.BigEndian.Uint32(p[1:])
+	count := binary.BigEndian.Uint32(p[1:])
 	p = p[5:]
 
-	if int(v.count) <= 0 {
-		return
-	}
+	v.values = v.values[:0]
+	for i := uint32(0); i < count; i++ {
+		value, err := Amf0Discovery(p)
+		if err != nil {
+			return errors.WithMessage(err, fmt.Sprintf("discover element %v", i))
+		}
+		if err := value.UnmarshalBinary(p); err != nil {
+			return errors.WithMessage(err, fmt.Sprintf("unmarshal element %v", i))
+		}
 
-	if err = v.unmarshal(p, false, int(v.count)); err != nil {
-		return errors.WithMessage(err, "unmarshal")
+		v.values = append(v.values, value)
+		p = p[value.Size():]
 	}
 	return
 }
@@ -774,12 +792,18 @@ func (v *amf0StrictArray) MarshalBinary() (data []byte, err error) {
 		return nil, errors.Wrap(err, "marshal")
 	}
 
-	if err = binary.Write(b, binary.BigEndian, v.count); err != nil {
+	if err = binary.Write(b, binary.BigEndian, uint32(len(v.values))); err != nil {
 		return nil, errors.Wrap(err, "marshal")
 	}
 
-	if err = v.marshal(b); err != nil {
-		return nil, errors.WithMessage(err, "marshal")
+	for i, value := range v.values {
+		pb, err := value.MarshalBinary()
+		if err != nil {
+			return nil, errors.WithMessage(err, fmt.Sprintf("marshal element %v", i))
+		}
+		if _, err = b.Write(pb); err != nil {
+			return nil, errors.Wrapf(err, "write element %v", i)
+		}
 	}
 
 	return b.Bytes(), nil

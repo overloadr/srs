@@ -313,20 +313,6 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 		case *rtmp.PlayPacket:
 			streamName = pkt.StreamName.String()
 			clientType = RTMPClientTypeViewer
-
-			identifyRes := rtmp.NewCallPacket()
-			response = identifyRes
-
-			identifyRes.CommandName = "onStatus"
-			identifyRes.CommandObject = rtmp.NewAmf0Null()
-
-			data := rtmp.NewAmf0Object()
-			data.Set("level", rtmp.NewAmf0String("status"))
-			data.Set("code", rtmp.NewAmf0String("NetStream.Play.Reset"))
-			data.Set("description", rtmp.NewAmf0String("Playing and resetting stream."))
-			data.Set("details", rtmp.NewAmf0String("stream"))
-			data.Set("clientid", rtmp.NewAmf0String("ASAICiss"))
-			identifyRes.Args = data
 		}
 
 		if response != nil {
@@ -355,6 +341,13 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 		}
 	} else {
 		if err := backend.Connect(ctx, tcUrl, streamName); err != nil {
+			// The backend may have already returned a useful onStatus error,
+			// such as NetStream.Play.StreamNotFound. Forward all messages
+			// received after play before closing the frontend connection, so
+			// clients see the real RTMP failure instead of a bare EOF.
+			if writeErr := backend.writePlayResponses(ctx, client, currentStreamID); writeErr != nil {
+				return errors.Wrapf(writeErr, "write backend play response after connect failed: %+v", err)
+			}
 			return errors.Wrapf(err, "connect backend, tcUrl=%v, stream=%v", tcUrl, streamName)
 		}
 	}
@@ -378,20 +371,10 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 			return errors.Wrapf(err, "start publish")
 		}
 	case RTMPClientTypeViewer:
-		identifyRes := rtmp.NewCallPacket()
-
-		identifyRes.CommandName = "onStatus"
-		identifyRes.CommandObject = rtmp.NewAmf0Null()
-
-		data := rtmp.NewAmf0Object()
-		data.Set("level", rtmp.NewAmf0String("status"))
-		data.Set("code", rtmp.NewAmf0String("NetStream.Play.Start"))
-		data.Set("description", rtmp.NewAmf0String("Started playing stream."))
-		data.Set("details", rtmp.NewAmf0String("stream"))
-		data.Set("clientid", rtmp.NewAmf0String("ASAICiss"))
-		identifyRes.Args = data
-
-		if err := client.WritePacket(ctx, identifyRes, currentStreamID); err != nil {
+		// Preserve the exact SRS playback startup sequence, including
+		// StreamBegin, NetStream.Play.Reset and NetStream.Play.Start.
+		// Some RTMP clients, including ZLMediaKit, depend on this sequence.
+		if err := backend.writePlayResponses(ctx, client, currentStreamID); err != nil {
 			return errors.Wrapf(err, "start play")
 		}
 	}
@@ -485,6 +468,10 @@ type rtmpClientToBackend struct {
 	tcpConn io.ReadWriteCloser
 	// The RTMP protocol client.
 	client rtmp.Protocol
+	// Packets returned by the backend after the play request and before
+	// NetStream.Play.Start, or before a play error. These messages must be
+	// forwarded to the frontend client instead of being consumed internally.
+	playResponses []rtmp.Packet
 	// The stream type.
 	typ RTMPClientType
 	// The load balancer for origin servers.
@@ -524,6 +511,25 @@ func (v *rtmpClientToBackend) Close() error {
 	if v.tcpConn != nil {
 		v.tcpConn.Close()
 	}
+	return nil
+}
+
+func (v *rtmpClientToBackend) writePlayResponses(ctx context.Context, client rtmp.Protocol, streamID int) error {
+	for _, packet := range v.playResponses {
+		packetStreamID := streamID
+		if control, ok := packet.(*rtmp.UserControl); ok {
+			packetStreamID = 0
+			switch control.EventType {
+			case rtmp.EventTypeStreamBegin, rtmp.EventTypeStreamEOF, rtmp.EventTypeStreamDry:
+				control.EventData = int32(streamID)
+			}
+		}
+
+		if err := client.WritePacket(ctx, packet, packetStreamID); err != nil {
+			return errors.Wrapf(err, "write play response %T", packet)
+		}
+	}
+	v.playResponses = nil
 	return nil
 }
 
@@ -768,6 +774,8 @@ func (v *rtmpClientToBackend) publish(ctx context.Context, client rtmp.Protocol,
 }
 
 func (v *rtmpClientToBackend) play(ctx context.Context, client rtmp.Protocol, streamName string) error {
+	v.playResponses = nil
+
 	var currentStreamID int
 	if true {
 		createStream := rtmp.NewCreateStreamPacket()
@@ -795,12 +803,36 @@ func (v *rtmpClientToBackend) play(ctx context.Context, client rtmp.Protocol, st
 	}
 
 	for {
-		var identifyRes *rtmp.CallPacket
-		if _, err := rtmp.ExpectPacket(ctx, client, &identifyRes); err != nil {
-			return errors.Wrapf(err, "expect releaseStream res")
+		message, err := client.ReadMessage(ctx)
+		if err != nil {
+			return errors.Wrapf(err, "read play response")
 		}
-		if identifyRes.CommandName == "onStatus" && identifyRes.ArgsCode() == "NetStream.Play.Start" {
+		switch message.MessageType() {
+		case rtmp.MessageTypeUserControl, rtmp.MessageTypeAMF0Command, rtmp.MessageTypeAMF3Command:
+		default:
+			continue
+		}
+
+		packet, err := client.DecodeMessage(message)
+		if err != nil {
+			return errors.Wrapf(err, "decode play response")
+		}
+		v.playResponses = append(v.playResponses, packet)
+
+		status, ok := packet.(*rtmp.CallPacket)
+		if !ok || status.CommandName != "onStatus" {
+			continue
+		}
+
+		code := status.ArgsCode()
+		if code == "NetStream.Play.Start" {
 			break
+		}
+		if status.ArgsLevel() == "error" ||
+			code == "NetStream.Play.StreamNotFound" ||
+			code == "NetStream.Play.Failed" ||
+			code == "NetStream.Play.Stop" {
+			return errors.Errorf("backend rejected play, code=%v, level=%v", code, status.ArgsLevel())
 		}
 	}
 	return nil

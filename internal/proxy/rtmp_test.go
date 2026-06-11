@@ -81,7 +81,18 @@ func queueDecode(p *rtmpfakes.FakeProtocol, packets ...rtmp.Packet) {
 // The payload is irrelevant because DecodeMessage is stubbed.
 func readMessageOK(p *rtmpfakes.FakeProtocol) {
 	p.ReadMessageStub = func(ctx context.Context) (rtmp.Message, error) {
-		return rtmp.NewMessage(), nil
+		return rtmp.NewMessageWithType(rtmp.MessageTypeAMF0Command), nil
+	}
+}
+
+func queueMessageTypes(p *rtmpfakes.FakeProtocol, types ...rtmp.MessageType) {
+	var i atomic.Int32
+	p.ReadMessageStub = func(ctx context.Context) (rtmp.Message, error) {
+		idx := int(i.Add(1)) - 1
+		if idx >= len(types) {
+			return nil, errors.New("message queue drained")
+		}
+		return rtmp.NewMessageWithType(types[idx]), nil
 	}
 }
 
@@ -95,6 +106,13 @@ func onStatusPacket(code string) *rtmp.CallPacket {
 	data := rtmp.NewAmf0Object()
 	data.Set("code", rtmp.NewAmf0String(code))
 	pkt.Args = data
+	return pkt
+}
+
+func onStatusPacketWithLevel(code, level string) *rtmp.CallPacket {
+	pkt := onStatusPacket(code)
+	data := pkt.Args.(rtmp.Amf0Object)
+	data.Set("level", rtmp.NewAmf0String(level))
 	return pkt
 }
 
@@ -568,8 +586,8 @@ func TestRtmpClientToBackend_Play_CreateStreamSkipsZeroID(t *testing.T) {
 }
 
 func TestRtmpClientToBackend_Play_FiltersUntilPlayStart(t *testing.T) {
-	// play() ignores onStatus packets whose code is not NetStream.Play.Start
-	// (e.g. the proxy sees a NetStream.Play.Reset first).
+	// play() waits through Reset until Play.Start and retains both packets for
+	// replay to the frontend client.
 	c, p := newIsolatedBackend(t, RTMPClientTypeViewer)
 	queueDecode(p,
 		createStreamRes(1),
@@ -579,6 +597,87 @@ func TestRtmpClientToBackend_Play_FiltersUntilPlayStart(t *testing.T) {
 
 	if err := c.play(context.Background(), p, "stream"); err != nil {
 		t.Fatalf("play: %+v", err)
+	}
+	if got := len(c.playResponses); got != 2 {
+		t.Fatalf("playResponses=%d, want 2", got)
+	}
+}
+
+func TestRtmpClientToBackend_Play_ReplaysSRSStartupSequence(t *testing.T) {
+	c, backend := newIsolatedBackend(t, RTMPClientTypeViewer)
+	queueMessageTypes(backend,
+		rtmp.MessageTypeAMF0Command, // createStream response
+		rtmp.MessageTypeUserControl,
+		rtmp.MessageTypeAMF0Command,
+		rtmp.MessageTypeAMF0Command,
+	)
+	streamBegin := rtmp.NewUserControl()
+	streamBegin.EventType = rtmp.EventTypeStreamBegin
+	streamBegin.EventData = 3
+	queueDecode(backend,
+		createStreamRes(3),
+		streamBegin,
+		onStatusPacket("NetStream.Play.Reset"),
+		onStatusPacket("NetStream.Play.Start"),
+	)
+
+	if err := c.play(context.Background(), backend, "stream"); err != nil {
+		t.Fatalf("play: %+v", err)
+	}
+
+	frontend := &rtmpfakes.FakeProtocol{}
+	if err := c.writePlayResponses(context.Background(), frontend, 7); err != nil {
+		t.Fatalf("writePlayResponses: %+v", err)
+	}
+	if got := frontend.WritePacketCallCount(); got != 3 {
+		t.Fatalf("WritePacket called %d times, want 3", got)
+	}
+
+	_, first, firstStreamID := frontend.WritePacketArgsForCall(0)
+	control, ok := first.(*rtmp.UserControl)
+	if !ok {
+		t.Fatalf("first packet=%T, want *rtmp.UserControl", first)
+	}
+	if firstStreamID != 0 || control.EventData != 7 {
+		t.Fatalf("StreamBegin streamID=%d eventData=%d, want 0/7", firstStreamID, control.EventData)
+	}
+	for i := 1; i < 3; i++ {
+		_, _, streamID := frontend.WritePacketArgsForCall(i)
+		if streamID != 7 {
+			t.Fatalf("packet %d streamID=%d, want 7", i, streamID)
+		}
+	}
+	if len(c.playResponses) != 0 {
+		t.Fatal("play responses should be cleared after replay")
+	}
+}
+
+func TestRtmpClientToBackend_Play_ReplaysBackendError(t *testing.T) {
+	c, backend := newIsolatedBackend(t, RTMPClientTypeViewer)
+	queueDecode(backend,
+		createStreamRes(1),
+		onStatusPacketWithLevel("NetStream.Play.StreamNotFound", "error"),
+	)
+
+	err := c.play(context.Background(), backend, "missing")
+	if err == nil || !strings.Contains(err.Error(), "StreamNotFound") {
+		t.Fatalf("play error=%v, want StreamNotFound", err)
+	}
+
+	frontend := &rtmpfakes.FakeProtocol{}
+	if err := c.writePlayResponses(context.Background(), frontend, 1); err != nil {
+		t.Fatalf("writePlayResponses: %+v", err)
+	}
+	if got := frontend.WritePacketCallCount(); got != 1 {
+		t.Fatalf("WritePacket called %d times, want 1", got)
+	}
+	_, packet, streamID := frontend.WritePacketArgsForCall(0)
+	status, ok := packet.(*rtmp.CallPacket)
+	if !ok {
+		t.Fatalf("packet=%T, want *rtmp.CallPacket", packet)
+	}
+	if status.ArgsCode() != "NetStream.Play.StreamNotFound" || streamID != 1 {
+		t.Fatalf("code=%v streamID=%d", status.ArgsCode(), streamID)
 	}
 }
 
@@ -925,9 +1024,10 @@ func TestRtmpConnection_Serve_IdentifyDefaultCallThenViewer(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "connect backend") {
 		t.Fatalf("expected connect backend error, got %v", err)
 	}
-	// WritePacket calls: ack, chunk, connectRes, _result, onStatus(play).
-	if got := f.clientProto.WritePacketCallCount(); got != 5 {
-		t.Fatalf("WritePacket called %d times, want 5", got)
+	// WritePacket calls: ack, chunk, connectRes and _result. Playback status
+	// is no longer synthesized before the backend connection succeeds.
+	if got := f.clientProto.WritePacketCallCount(); got != 4 {
+		t.Fatalf("WritePacket called %d times, want 4", got)
 	}
 	if v := f.backendClientType.Load(); v != RTMPClientTypeViewer {
 		t.Fatalf("backend clientType=%v, want viewer", v)

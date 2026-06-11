@@ -240,6 +240,39 @@ func TestWriteMessageHeadersChunkingAndErrors(t *testing.T) {
 	}
 }
 
+func TestConnectAppPacketWithFourCcList(t *testing.T) {
+	connect := NewConnectAppPacket()
+	connect.CommandObject.Set("app", NewAmf0String("live/test"))
+	connect.CommandObject.Set("tcUrl", NewAmf0String("rtmp://example.com/live/test"))
+	connect.CommandObject.Set("fourCcList", NewAmf0StrictArray().
+		Append(NewAmf0String("hvc1")).
+		Append(NewAmf0String("av01")).
+		Append(NewAmf0String("vp09")))
+
+	data, err := connect.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+
+	decoded := NewConnectAppPacket()
+	if err := decoded.UnmarshalBinary(data); err != nil {
+		t.Fatalf("UnmarshalBinary: %v", err)
+	}
+
+	fourCcList := NewAmf0Converter(decoded.CommandObject.Get("fourCcList")).ToStrictArray()
+	if fourCcList == nil {
+		t.Fatal("fourCcList is not a strict array")
+	}
+	if fourCcList.Len() != 3 {
+		t.Fatalf("fourCcList len=%v, want 3", fourCcList.Len())
+	}
+	for i, want := range []string{"hvc1", "av01", "vp09"} {
+		if got := NewAmf0Converter(fourCcList.At(i)).ToString().String(); got != want {
+			t.Fatalf("fourCcList[%d]=%q, want %q", i, got, want)
+		}
+	}
+}
+
 func TestProtocolDecodeMessageAndControls(t *testing.T) {
 	ctx := context.Background()
 	p := NewProtocol(&bytes.Buffer{}).(*protocol)
