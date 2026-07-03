@@ -156,6 +156,9 @@ func TestRtmpClientToBackend_Close_FakeConn(t *testing.T) {
 	if !conn.closed.Load() {
 		t.Fatal("fakeConn was not closed")
 	}
+	if c.tcpConn != nil {
+		t.Fatal("tcpConn should be nil after Close")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +271,55 @@ func TestRtmpClientToBackend_Connect_HandshakeWriteC0Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "write c0") {
 		t.Fatalf("unexpected error %v", err)
+	}
+	if !f.conn.closed.Load() {
+		t.Fatal("backend conn should be closed after failed connect")
+	}
+	if f.client.tcpConn != nil {
+		t.Fatal("tcpConn should be nil after failed connect")
+	}
+}
+
+func TestRtmpClientToBackend_ConnectWithRetry_RepickClosesFirstBackend(t *testing.T) {
+	conn1 := &fakeConn{}
+	conn2 := &fakeConn{}
+	var dials atomic.Int32
+
+	f := newBackendFixture(RTMPClientTypePublisher)
+	backend1 := &lb.OriginServer{
+		IP: "10.0.0.1", RTMP: []string{"1935"},
+		ServerID: "s1", ServiceID: "svc1", PID: "1",
+	}
+	backend2 := &lb.OriginServer{
+		IP: "10.0.0.2", RTMP: []string{"1935"},
+		ServerID: "s2", ServiceID: "svc2", PID: "2",
+	}
+	f.lb.PickReturns(backend1, nil)
+	f.lb.RepickReturns(backend2, nil)
+	f.client.dial = func(ctx context.Context, ip string, port int) (io.ReadWriteCloser, error) {
+		if dials.Add(1) == 1 {
+			return conn1, nil
+		}
+		return conn2, nil
+	}
+	f.handshake.WriteC0S0ReturnsOnCall(0, errors.New("fail first"))
+	f.handshake.ReadC0S0Returns(nil, errors.New("read s0 fail"))
+
+	_, err := f.client.ConnectWithRetry(context.Background(), "rtmp://1.2.3.4/live", "stream")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !conn1.closed.Load() {
+		t.Fatal("first backend conn should be closed after failed connect")
+	}
+	if !conn2.closed.Load() {
+		t.Fatal("second backend conn should be closed after failed connect")
+	}
+	if f.client.tcpConn != nil {
+		t.Fatal("tcpConn should be nil after connect failure")
+	}
+	if f.lb.RepickCallCount() != 1 {
+		t.Fatalf("Repick calls=%d, want 1", f.lb.RepickCallCount())
 	}
 }
 

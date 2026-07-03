@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"srsx/internal/env"
 	"srsx/internal/errors"
@@ -20,6 +21,8 @@ import (
 	"srsx/internal/utils"
 	"srsx/internal/version"
 )
+
+const rtmpFDWarnPercent = 80
 
 // RTMPProxyServer is the proxy for SRS RTMP server, to proxy the RTMP stream to backend SRS
 // server. It will figure out the backend server to proxy to. Unlike the edge server, it will
@@ -46,6 +49,8 @@ type rtmpProxyServer struct {
 	// load balancer. Defaults to a real rtmpConnection; tests may override via
 	// a functional option to supply a fake.
 	newConnection func() *rtmpConnection
+	// activeConnections tracks live frontend RTMP client sessions.
+	activeConnections atomic.Int64
 }
 
 func NewRTMPProxyServer(environment env.ProxyEnvironment, loadBalancer lb.OriginLoadBalancer, opts ...func(*rtmpProxyServer)) RTMPProxyServer {
@@ -111,10 +116,17 @@ func (v *rtmpProxyServer) Run(ctx context.Context) error {
 				return
 			}
 
+			active := v.activeConnections.Add(1)
+			logRTMPConnectionStats(ctx, active, "RTMP client accepted")
+
 			v.wg.Add(1)
 			go func(ctx context.Context, conn net.Conn) {
 				defer v.wg.Done()
 				defer conn.Close()
+				defer func() {
+					active := v.activeConnections.Add(-1)
+					logRTMPConnectionStats(ctx, active, "RTMP client closed")
+				}()
 
 				handleErr := func(err error) {
 					if utils.IsPeerClosedError(err) || utils.IsClosedNetworkError(err) {
@@ -508,10 +520,17 @@ func newRTMPClientToBackend(opts ...func(*rtmpClientToBackend)) *rtmpClientToBac
 }
 
 func (v *rtmpClientToBackend) Close() error {
+	v.closeBackendTCP()
+	return nil
+}
+
+func (v *rtmpClientToBackend) closeBackendTCP() {
 	if v.tcpConn != nil {
 		v.tcpConn.Close()
+		v.tcpConn = nil
 	}
-	return nil
+	v.client = nil
+	v.playResponses = nil
 }
 
 func (v *rtmpClientToBackend) writePlayResponses(ctx context.Context, client rtmp.Protocol, streamID int) error {
@@ -577,7 +596,9 @@ func (v *rtmpClientToBackend) connectWithRetry(ctx context.Context, tcUrl, strea
 	if err != nil {
 		// For publisher connections with retry enabled, try repicking a different server.
 		if allowRepick && v.typ == RTMPClientTypePublisher {
-			logger.Warn(ctx, "connect to backend %v failed for publisher, trying repick: %+v", backend.ID(), err)
+			v.closeBackendTCP()
+			logger.Warn(ctx, "connect to backend %v failed for publisher, trying repick: %+v%v",
+				backend.ID(), err, formatFDUsageSuffix())
 
 			// Clear the failed mapping and pick a new server.
 			newBackend, repickErr := v.loadBalancer.Repick(ctx, streamURL, backend.ID())
@@ -601,7 +622,7 @@ func (v *rtmpClientToBackend) connectWithRetry(ctx context.Context, tcUrl, strea
 
 // connectToBackend attempts to connect to a specific backend server.
 // It performs the TCP connection, RTMP handshake, and initial protocol setup.
-func (v *rtmpClientToBackend) connectToBackend(ctx context.Context, backend *lb.OriginServer, tcUrl, streamName, streamURL string) (*BackendInfo, error) {
+func (v *rtmpClientToBackend) connectToBackend(ctx context.Context, backend *lb.OriginServer, tcUrl, streamName, streamURL string) (info *BackendInfo, err error) {
 	// Parse RTMP port from backend.
 	if len(backend.RTMP) == 0 {
 		return nil, errors.Errorf("no rtmp server %+v for %v", backend, streamURL)
@@ -620,6 +641,12 @@ func (v *rtmpClientToBackend) connectToBackend(ctx context.Context, backend *lb.
 		return nil, errors.Wrapf(err, "dial backend ip=%v, port=%v, srs=%v", backend.IP, rtmpPort, backend)
 	}
 	v.tcpConn = c
+
+	defer func() {
+		if err != nil {
+			v.closeBackendTCP()
+		}
+	}()
 
 	hs := v.newHandshake()
 	client := v.newProtocol(c)
@@ -678,6 +705,29 @@ func (v *rtmpClientToBackend) connectToBackend(ctx context.Context, backend *lb.
 	}
 
 	return &BackendInfo{Server: backend, StreamURL: streamURL}, nil
+}
+
+func logRTMPConnectionStats(ctx context.Context, active int64, event string) {
+	open, soft, ok := utils.OpenFDStats()
+	if !ok {
+		logger.Debug(ctx, "%v, active_rtmp=%v", event, active)
+		return
+	}
+
+	if soft > 0 && open*100 >= int(soft)*rtmpFDWarnPercent {
+		logger.Warn(ctx, "%v, active_rtmp=%v, open_fd=%v, fd_soft_limit=%v", event, active, open, soft)
+		return
+	}
+
+	logger.Debug(ctx, "%v, active_rtmp=%v, open_fd=%v, fd_soft_limit=%v", event, active, open, soft)
+}
+
+func formatFDUsageSuffix() string {
+	open, soft, ok := utils.OpenFDStats()
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(", open_fd=%v, fd_soft_limit=%v", open, soft)
 }
 
 func (v *rtmpClientToBackend) publish(ctx context.Context, client rtmp.Protocol, streamName string) error {
