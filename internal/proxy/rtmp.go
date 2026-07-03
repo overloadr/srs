@@ -708,22 +708,25 @@ func (v *rtmpClientToBackend) connectToBackend(ctx context.Context, backend *lb.
 }
 
 func logRTMPConnectionStats(ctx context.Context, active int64, event string) {
-	open, soft, ok := utils.OpenFDStats()
+	open, soft, ok := utils.CachedOpenFDStats(false)
 	if !ok {
 		logger.Debug(ctx, "%v, active_rtmp=%v", event, active)
 		return
 	}
 
 	if soft > 0 && open*100 >= int(soft)*rtmpFDWarnPercent {
-		logger.Warn(ctx, "%v, active_rtmp=%v, open_fd=%v, fd_soft_limit=%v", event, active, open, soft)
-		return
+		open, soft, ok = utils.CachedOpenFDStats(true)
+		if ok {
+			logger.Warn(ctx, "%v, active_rtmp=%v, open_fd=%v, fd_soft_limit=%v", event, active, open, soft)
+			return
+		}
 	}
 
-	logger.Debug(ctx, "%v, active_rtmp=%v, open_fd=%v, fd_soft_limit=%v", event, active, open, soft)
+	logger.Debug(ctx, "%v, active_rtmp=%v", event, active)
 }
 
 func formatFDUsageSuffix() string {
-	open, soft, ok := utils.OpenFDStats()
+	open, soft, ok := utils.CachedOpenFDStats(true)
 	if !ok {
 		return ""
 	}

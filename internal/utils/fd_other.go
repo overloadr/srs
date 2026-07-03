@@ -10,3 +10,8 @@ package utils
 func OpenFDStats() (open int, softLimit uint64, ok bool) {
 	return 0, 0, false
 }
+
+// CachedOpenFDStats is only supported on Linux.
+func CachedOpenFDStats(forceRefresh bool) (open int, softLimit uint64, ok bool) {
+	return 0, 0, false
+}
