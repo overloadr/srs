@@ -415,6 +415,75 @@ func TestRtcConnection_HandlePacket(t *testing.T) {
 	})
 }
 
+func TestRtcConnection_CloseReleasesBackendUDP(t *testing.T) {
+	f := newRtcConnFixture()
+	f.lb.PickReturns(&lb.OriginServer{IP: "127.0.0.1", RTC: []string{"18000"}}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.conn.Initialize(ctx, f.listener)
+
+	if err := f.conn.connectBackend(context.Background()); err != nil {
+		t.Fatalf("connectBackend: %v", err)
+	}
+	unregistered := atomic.Bool{}
+	f.conn.onClose = func(c *rtcConnection) { unregistered.Store(true) }
+
+	if err := f.conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !f.backend.closed.Load() {
+		t.Fatal("backend UDP should be closed")
+	}
+	if f.conn.backendUDP != nil {
+		t.Fatal("backendUDP should be nil after Close")
+	}
+	if !unregistered.Load() {
+		t.Fatal("onClose should be invoked")
+	}
+	if err := f.conn.HandlePacket(&net.UDPAddr{}, []byte("x")); err != nil {
+		t.Fatalf("HandlePacket after Close should be noop, got %v", err)
+	}
+}
+
+func TestRtcConnection_IdleTimeoutClosesBackendUDP(t *testing.T) {
+	f := newRtcConnFixture()
+	f.lb.PickReturns(&lb.OriginServer{IP: "127.0.0.1", RTC: []string{"18000"}}, nil)
+	f.conn.idleTimeout = 40 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.conn.Initialize(ctx, f.listener)
+
+	if err := f.conn.HandlePacket(&net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 9}, []byte("x")); err != nil {
+		t.Fatalf("HandlePacket: %v", err)
+	}
+	select {
+	case <-f.backend.writes:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for backend write")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.backend.closed.Load() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("backend UDP was not closed after idle timeout")
+}
+
+func TestParseWebRTCIdleTimeout(t *testing.T) {
+	if got := parseWebRTCIdleTimeout(""); got != defaultWebRTCIdleTimeout {
+		t.Fatalf("empty=%v, want %v", got, defaultWebRTCIdleTimeout)
+	}
+	if got := parseWebRTCIdleTimeout("30s"); got != 30*time.Second {
+		t.Fatalf("30s=%v", got)
+	}
+	if got := parseWebRTCIdleTimeout("bad"); got != defaultWebRTCIdleTimeout {
+		t.Fatalf("bad=%v, want default", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // webRTCProxyServer: fakes, helpers, and fixtures
 // ---------------------------------------------------------------------------

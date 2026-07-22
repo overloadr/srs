@@ -262,6 +262,20 @@ func TestMemLB_LoadWebRTCByUfrag_NotFound(t *testing.T) {
 	}
 }
 
+func TestMemLB_DeleteWebRTCByUfrag(t *testing.T) {
+	lb := newMem()
+	s := &stubRTC{ufrag: "ufrg1"}
+	if err := lb.StoreWebRTC(context.Background(), "url1", s); err != nil {
+		t.Fatalf("StoreWebRTC: %v", err)
+	}
+	if err := lb.DeleteWebRTCByUfrag(context.Background(), "ufrg1"); err != nil {
+		t.Fatalf("DeleteWebRTCByUfrag: %v", err)
+	}
+	if _, err := lb.LoadWebRTCByUfrag(context.Background(), "ufrg1"); err == nil {
+		t.Fatal("expected ufrag to be deleted")
+	}
+}
+
 func TestMemLB_List(t *testing.T) {
 	lb := newMem()
 	ctx := context.Background()

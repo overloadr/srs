@@ -329,6 +329,7 @@ func TestNewProxyEnvironment_AppliesDefaultsAndAccessors(t *testing.T) {
 		{"HttpServer", env.HttpServer(), "18080"},
 		{"RtmpServer", env.RtmpServer(), "11935"},
 		{"WebRTCServer", env.WebRTCServer(), "18000"},
+		{"WebRTCIdleTimeout", env.WebRTCIdleTimeout(), "120s"},
 		{"SRTServer", env.SRTServer(), "20080"},
 		{"SystemAPI", env.SystemAPI(), "12025"},
 		{"StaticFiles", env.StaticFiles(), "./trunk/research"},

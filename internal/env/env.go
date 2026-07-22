@@ -43,6 +43,8 @@ type ProxyEnvironment interface {
 	WebRTCServer() string
 	// WebRTC candidate IP for ICE, used in SDP answer
 	WebRTCCandidateIP() string
+	// WebRTC idle timeout for releasing backend UDP sessions
+	WebRTCIdleTimeout() string
 	// SRT media server port (UDP)
 	SRTServer() string
 	// System API server port
@@ -116,6 +118,10 @@ func (e *proxyEnvironment) WebRTCServer() string {
 
 func (e *proxyEnvironment) WebRTCCandidateIP() string {
 	return getEnv("PROXY_WEBRTC_CANDIDATE_IP")
+}
+
+func (e *proxyEnvironment) WebRTCIdleTimeout() string {
+	return getEnv("PROXY_WEBRTC_IDLE_TIMEOUT")
 }
 
 func (e *proxyEnvironment) SRTServer() string {
@@ -294,6 +300,9 @@ func buildDefaultEnvironmentVariables(ctx context.Context) {
 	// candidate IP will be used. For multi-proxy cluster with Redis, this should be
 	// set to the proxy's public IP so clients connect to the proxy instead of backend.
 	setEnvDefault("PROXY_WEBRTC_CANDIDATE_IP", "")
+	// Idle timeout for WebRTC media sessions. After this duration without UDP
+	// traffic, the proxy closes the backend UDP socket and drops session state.
+	setEnvDefault("PROXY_WEBRTC_IDLE_TIMEOUT", "120s")
 	// The SRT media server, via UDP protocol.
 	setEnvDefault("PROXY_SRT_SERVER", "20080")
 	// The API server of proxy itself.

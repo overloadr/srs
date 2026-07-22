@@ -322,6 +322,20 @@ func (v *redisLoadBalancer) LoadWebRTCByUfrag(ctx context.Context, ufrag string)
 	return nil, errors.Errorf("Redis load balancer cannot deserialize interface types")
 }
 
+func (v *redisLoadBalancer) DeleteWebRTCByUfrag(ctx context.Context, ufrag string) error {
+	key := v.redisKeyUfrag(ufrag)
+	if b, err := v.rdb.Get(ctx, key).Bytes(); err == nil && len(b) > 0 {
+		var meta struct {
+			StreamURL string `json:"stream_url"`
+		}
+		if err := json.Unmarshal(b, &meta); err == nil && meta.StreamURL != "" {
+			_ = v.rdb.Del(ctx, v.redisKeyRTC(meta.StreamURL))
+		}
+	}
+	_ = v.rdb.Del(ctx, key)
+	return nil
+}
+
 func (v *redisLoadBalancer) redisKeyUfrag(ufrag string) string {
 	return fmt.Sprintf("srs-proxy-ufrag:%v", ufrag)
 }

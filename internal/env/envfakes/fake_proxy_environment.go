@@ -227,6 +227,16 @@ type FakeProxyEnvironment struct {
 	webRTCCandidateIPReturnsOnCall map[int]struct {
 		result1 string
 	}
+	WebRTCIdleTimeoutStub        func() string
+	webRTCIdleTimeoutMutex       sync.RWMutex
+	webRTCIdleTimeoutArgsForCall []struct {
+	}
+	webRTCIdleTimeoutReturns struct {
+		result1 string
+	}
+	webRTCIdleTimeoutReturnsOnCall map[int]struct {
+		result1 string
+	}
 	WebRTCServerStub        func() string
 	webRTCServerMutex       sync.RWMutex
 	webRTCServerArgsForCall []struct {
@@ -1403,6 +1413,59 @@ func (fake *FakeProxyEnvironment) WebRTCCandidateIPReturnsOnCall(i int, result1 
 		})
 	}
 	fake.webRTCCandidateIPReturnsOnCall[i] = struct {
+		result1 string
+	}{result1}
+}
+
+func (fake *FakeProxyEnvironment) WebRTCIdleTimeout() string {
+	fake.webRTCIdleTimeoutMutex.Lock()
+	ret, specificReturn := fake.webRTCIdleTimeoutReturnsOnCall[len(fake.webRTCIdleTimeoutArgsForCall)]
+	fake.webRTCIdleTimeoutArgsForCall = append(fake.webRTCIdleTimeoutArgsForCall, struct {
+	}{})
+	stub := fake.WebRTCIdleTimeoutStub
+	fakeReturns := fake.webRTCIdleTimeoutReturns
+	fake.recordInvocation("WebRTCIdleTimeout", []interface{}{})
+	fake.webRTCIdleTimeoutMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeProxyEnvironment) WebRTCIdleTimeoutCallCount() int {
+	fake.webRTCIdleTimeoutMutex.RLock()
+	defer fake.webRTCIdleTimeoutMutex.RUnlock()
+	return len(fake.webRTCIdleTimeoutArgsForCall)
+}
+
+func (fake *FakeProxyEnvironment) WebRTCIdleTimeoutCalls(stub func() string) {
+	fake.webRTCIdleTimeoutMutex.Lock()
+	defer fake.webRTCIdleTimeoutMutex.Unlock()
+	fake.WebRTCIdleTimeoutStub = stub
+}
+
+func (fake *FakeProxyEnvironment) WebRTCIdleTimeoutReturns(result1 string) {
+	fake.webRTCIdleTimeoutMutex.Lock()
+	defer fake.webRTCIdleTimeoutMutex.Unlock()
+	fake.WebRTCIdleTimeoutStub = nil
+	fake.webRTCIdleTimeoutReturns = struct {
+		result1 string
+	}{result1}
+}
+
+func (fake *FakeProxyEnvironment) WebRTCIdleTimeoutReturnsOnCall(i int, result1 string) {
+	fake.webRTCIdleTimeoutMutex.Lock()
+	defer fake.webRTCIdleTimeoutMutex.Unlock()
+	fake.WebRTCIdleTimeoutStub = nil
+	if fake.webRTCIdleTimeoutReturnsOnCall == nil {
+		fake.webRTCIdleTimeoutReturnsOnCall = make(map[int]struct {
+			result1 string
+		})
+	}
+	fake.webRTCIdleTimeoutReturnsOnCall[i] = struct {
 		result1 string
 	}{result1}
 }

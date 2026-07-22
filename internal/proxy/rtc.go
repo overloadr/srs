@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	stdSync "sync"
+	"sync/atomic"
 	"time"
 
 	"srsx/internal/env"
@@ -24,6 +25,9 @@ import (
 	"srsx/internal/sync"
 	"srsx/internal/utils"
 )
+
+// defaultWebRTCIdleTimeout is used when PROXY_WEBRTC_IDLE_TIMEOUT is unset or invalid.
+const defaultWebRTCIdleTimeout = 120 * time.Second
 
 // WebRTCProxyServer is the proxy for SRS WebRTC server via WHIP or WHEP protocol. It will figure out
 // which backend server to proxy to. It will also replace the UDP port to the proxy server's in the
@@ -52,6 +56,11 @@ type webRTCProxyServer struct {
 	// TODO: Support fast earch by uint64 address.
 	addresses sync.Map[string, *rtcConnection]
 
+	// Idle timeout for WebRTC media sessions. Zero disables idle eviction.
+	idleTimeout time.Duration
+	// activeConnections tracks live WebRTC media sessions with a backend UDP socket.
+	activeConnections atomic.Int64
+
 	// The wait group for server.
 	wg stdSync.WaitGroup
 
@@ -72,6 +81,7 @@ func NewWebRTCProxyServer(environment env.ProxyEnvironment, loadBalancer lb.Orig
 		loadBalancer: loadBalancer,
 		usernames:    sync.NewMap[string, *rtcConnection](),
 		addresses:    sync.NewMap[string, *rtcConnection](),
+		idleTimeout:  parseWebRTCIdleTimeout(environment.WebRTCIdleTimeout()),
 	}
 
 	// Default listenUDP: resolve the endpoint and open a real UDP socket.
@@ -106,7 +116,23 @@ func NewWebRTCProxyServer(environment env.ProxyEnvironment, loadBalancer lb.Orig
 	return v
 }
 
+func parseWebRTCIdleTimeout(raw string) time.Duration {
+	if raw == "" {
+		return defaultWebRTCIdleTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return defaultWebRTCIdleTimeout
+	}
+	return d
+}
+
 func (v *webRTCProxyServer) Close() error {
+	v.usernames.Range(func(_ string, conn *rtcConnection) bool {
+		_ = conn.Close()
+		return true
+	})
+
 	if v.listener != nil {
 		_ = v.listener.Close()
 	}
@@ -276,7 +302,10 @@ func (v *webRTCProxyServer) proxyApiToBackend(
 	}
 	if err := v.loadBalancer.StoreWebRTC(ctx, streamURL, newRTCConnection(func(c *rtcConnection) {
 		c.loadBalancer = v.loadBalancer
+		c.server = v
 		c.StreamURL, c.Ufrag = streamURL, icePair.Ufrag()
+		c.idleTimeout = v.idleTimeout
+		c.onClose = v.unregisterRTCConnection
 		c.Initialize(ctx, v.listener)
 
 		// Cache the connection for fast search by username.
@@ -366,8 +395,16 @@ func (v *webRTCProxyServer) handleClientUDP(ctx context.Context, addr net.Addr, 
 		if s, err := v.loadBalancer.LoadWebRTCByUfrag(ctx, pkt.Username); err != nil {
 			return errors.Wrapf(err, "load webrtc by ufrag %v", pkt.Username)
 		} else {
-			connection = s.(*rtcConnection).Initialize(ctx, v.listener)
+			connection = s.(*rtcConnection)
 			connection.loadBalancer = v.loadBalancer
+			connection.server = v
+			if connection.onClose == nil {
+				connection.onClose = v.unregisterRTCConnection
+			}
+			if connection.idleTimeout == 0 {
+				connection.idleTimeout = v.idleTimeout
+			}
+			connection.Initialize(ctx, v.listener)
 			logger.Debug(ctx, "Create WebRTC connection by ufrag=%v, stream=%v", pkt.Username, connection.StreamURL)
 		}
 
@@ -402,6 +439,32 @@ func (v *webRTCProxyServer) handleClientUDP(ctx context.Context, addr net.Addr, 
 	return nil
 }
 
+func (v *webRTCProxyServer) unregisterRTCConnection(conn *rtcConnection) {
+	if conn == nil {
+		return
+	}
+
+	if conn.Ufrag != "" {
+		v.usernames.Delete(conn.Ufrag)
+	}
+	if conn.clientUDP != nil {
+		v.addresses.Delete(conn.clientUDP.String())
+	}
+	v.addresses.Range(func(addr string, c *rtcConnection) bool {
+		if c == conn {
+			v.addresses.Delete(addr)
+		}
+		return true
+	})
+
+	if v.loadBalancer != nil && conn.Ufrag != "" {
+		_ = v.loadBalancer.DeleteWebRTCByUfrag(context.Background(), conn.Ufrag)
+	}
+
+	logger.Debug(conn.ctx, "WebRTC connection unregistered, ufrag=%v, stream=%v, active_webrtc=%v",
+		conn.Ufrag, conn.StreamURL, v.activeConnections.Load())
+}
+
 // rtcConnection is a WebRTC connection proxy, for both WHIP and WHEP. It represents a WebRTC
 // connection, identify by the ufrag in sdp offer/answer and ICE binding request.
 //
@@ -415,6 +478,8 @@ func (v *webRTCProxyServer) handleClientUDP(ctx context.Context, addr net.Addr, 
 type rtcConnection struct {
 	// The stream context for WebRTC streaming.
 	ctx context.Context
+	// cancel ends the session-scoped context and stops the backend reader.
+	cancel context.CancelFunc
 	// The load balancer for origin servers.
 	loadBalancer lb.OriginLoadBalancer
 
@@ -440,6 +505,25 @@ type rtcConnection struct {
 	// called on every inbound client packet (STUN keepalives + RTCP feedback at
 	// steady state) but the reader must only start once per connection.
 	startReader stdSync.Once
+
+	// dialMu serializes connectBackend dialing and Close of backendUDP.
+	dialMu stdSync.Mutex
+	// idleMu protects idleTimer.
+	idleMu stdSync.Mutex
+	// idleTimer closes the session after idleTimeout without traffic.
+	idleTimer *time.Timer
+	// idleTimeout is the inactivity duration before Close. Zero disables eviction.
+	idleTimeout time.Duration
+	// closed is set once Close starts.
+	closed atomic.Bool
+	// closeOnce ensures Close runs at most once.
+	closeOnce stdSync.Once
+	// onClose unregisters this session from proxy caches and LB.
+	onClose func(*rtcConnection)
+	// activeDelta is +1 after a backend UDP is dialed, used for active_webrtc accounting.
+	activeDelta atomic.Int32
+	// server is optional back-reference for active connection stats.
+	server *webRTCProxyServer
 }
 
 func newRTCConnection(opts ...func(*rtcConnection)) *rtcConnection {
@@ -460,7 +544,10 @@ func newRTCConnection(opts ...func(*rtcConnection)) *rtcConnection {
 
 func (v *rtcConnection) Initialize(ctx context.Context, listener net.PacketConn) *rtcConnection {
 	if v.ctx == nil {
-		v.ctx = logger.WithContext(ctx)
+		cctx, cancel := context.WithCancel(ctx)
+		v.ctx = logger.WithContext(cctx)
+		v.cancel = cancel
+		v.armIdleTimer()
 	}
 	if listener != nil {
 		v.listenerUDP = listener
@@ -472,11 +559,80 @@ func (v *rtcConnection) GetUfrag() string {
 	return v.Ufrag
 }
 
+func (v *rtcConnection) touch() {
+	if v.closed.Load() {
+		return
+	}
+	v.armIdleTimer()
+}
+
+func (v *rtcConnection) armIdleTimer() {
+	if v.idleTimeout <= 0 {
+		return
+	}
+
+	v.idleMu.Lock()
+	defer v.idleMu.Unlock()
+	if v.closed.Load() {
+		return
+	}
+	if v.idleTimer != nil {
+		if !v.idleTimer.Stop() {
+			select {
+			case <-v.idleTimer.C:
+			default:
+			}
+		}
+	}
+	v.idleTimer = time.AfterFunc(v.idleTimeout, func() {
+		logger.Debug(v.ctx, "WebRTC idle timeout, closing ufrag=%v, stream=%v, idle=%v",
+			v.Ufrag, v.StreamURL, v.idleTimeout)
+		_ = v.Close()
+	})
+}
+
+func (v *rtcConnection) Close() error {
+	v.closeOnce.Do(func() {
+		v.closed.Store(true)
+
+		v.idleMu.Lock()
+		if v.idleTimer != nil {
+			_ = v.idleTimer.Stop()
+			v.idleTimer = nil
+		}
+		v.idleMu.Unlock()
+
+		if v.cancel != nil {
+			v.cancel()
+		}
+
+		v.dialMu.Lock()
+		if v.backendUDP != nil {
+			_ = v.backendUDP.Close()
+			v.backendUDP = nil
+		}
+		v.dialMu.Unlock()
+
+		if v.activeDelta.CompareAndSwap(1, 0) && v.server != nil {
+			v.server.activeConnections.Add(-1)
+		}
+
+		if v.onClose != nil {
+			v.onClose(v)
+		}
+	})
+	return nil
+}
+
 func (v *rtcConnection) HandlePacket(addr net.Addr, data []byte) error {
+	if v.closed.Load() {
+		return nil
+	}
 	ctx := v.ctx
 
 	// Update the current UDP address.
 	v.clientUDP = addr
+	v.touch()
 
 	// Start the UDP proxy to backend.
 	if err := v.connectBackend(ctx); err != nil {
@@ -484,7 +640,10 @@ func (v *rtcConnection) HandlePacket(addr net.Addr, data []byte) error {
 	}
 
 	// Proxy client message to backend.
-	if v.backendUDP == nil {
+	v.dialMu.Lock()
+	backendUDP := v.backendUDP
+	v.dialMu.Unlock()
+	if backendUDP == nil {
 		return nil
 	}
 
@@ -498,23 +657,31 @@ func (v *rtcConnection) HandlePacket(addr net.Addr, data []byte) error {
 		go func() {
 			buf := make([]byte, 4096)
 			for ctx.Err() == nil {
-				n, err := v.backendUDP.Read(buf)
+				n, err := backendUDP.Read(buf)
 				if err != nil {
-					// TODO: If backend server closed unexpectedly, we should notice the stream to quit.
-					logger.Warn(ctx, "read from backend failed, err=%v", err)
+					if !v.closed.Load() {
+						logger.Warn(ctx, "read from backend failed, err=%v", err)
+					}
+					_ = v.Close()
 					return
 				}
+				v.touch()
 
 				if _, err = v.listenerUDP.WriteTo(buf[:n], v.clientUDP); err != nil {
-					// TODO: If backend server closed unexpectedly, we should notice the stream to quit.
-					logger.Warn(ctx, "write to client failed, err=%v", err)
+					if !v.closed.Load() {
+						logger.Warn(ctx, "write to client failed, err=%v", err)
+					}
+					_ = v.Close()
 					return
 				}
 			}
 		}()
 	})
 
-	if _, err := v.backendUDP.Write(data); err != nil {
+	if _, err := backendUDP.Write(data); err != nil {
+		if v.closed.Load() {
+			return nil
+		}
 		return errors.Wrapf(err, "write to backend %v", v.StreamURL)
 	}
 
@@ -522,8 +689,18 @@ func (v *rtcConnection) HandlePacket(addr net.Addr, data []byte) error {
 }
 
 func (v *rtcConnection) connectBackend(ctx context.Context) error {
+	if v.closed.Load() {
+		return errors.Errorf("connection closed")
+	}
+
+	v.dialMu.Lock()
+	defer v.dialMu.Unlock()
+
 	if v.backendUDP != nil {
 		return nil
+	}
+	if v.closed.Load() {
+		return errors.Errorf("connection closed")
 	}
 
 	// Pick a backend SRS server to proxy the RTC stream.
@@ -543,12 +720,17 @@ func (v *rtcConnection) connectBackend(ctx context.Context) error {
 	}
 
 	// Connect to backend SRS server via UDP client.
-	// TODO: FIXME: Support close the connection when timeout or DTLS alert.
 	backendUDP, err := v.dialBackendUDP(ctx, backend.IP, int(udpPort))
 	if err != nil {
 		return errors.Wrapf(err, "dial udp to %v:%v", backend.IP, udpPort)
 	}
 	v.backendUDP = backendUDP
+
+	if v.activeDelta.CompareAndSwap(0, 1) && v.server != nil {
+		active := v.server.activeConnections.Add(1)
+		logger.Debug(ctx, "WebRTC backend UDP connected, ufrag=%v, stream=%v, active_webrtc=%v",
+			v.Ufrag, v.StreamURL, active)
+	}
 
 	return nil
 }

@@ -168,6 +168,9 @@ type RTCService interface {
 	StoreWebRTC(ctx context.Context, streamURL string, value RTCConnection) error
 	// Load the WebRTC streaming by ufrag, the ICE username.
 	LoadWebRTCByUfrag(ctx context.Context, ufrag string) (RTCConnection, error)
+	// DeleteWebRTCByUfrag removes the WebRTC session indexed by ICE ufrag.
+	// If a stream-URL mapping still points at the same session, it is removed too.
+	DeleteWebRTCByUfrag(ctx context.Context, ufrag string) error
 }
 
 // OriginLoadBalancer is the interface to load balance the SRS servers.
