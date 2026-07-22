@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -158,6 +159,33 @@ func TestRtmpClientToBackend_Close_FakeConn(t *testing.T) {
 	}
 	if c.tcpConn != nil {
 		t.Fatal("tcpConn should be nil after Close")
+	}
+}
+
+func TestRtmpClientToBackend_Close_Concurrent(t *testing.T) {
+	conn := &fakeConn{}
+	c := newRTMPClientToBackend(func(c *rtmpClientToBackend) {
+		c.tcpConn = conn
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := c.Close(); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+			c.closeBackendTCP()
+		}()
+	}
+	wg.Wait()
+
+	if !conn.closed.Load() {
+		t.Fatal("fakeConn was not closed")
+	}
+	if c.tcpConn != nil {
+		t.Fatal("tcpConn should be nil after concurrent Close")
 	}
 }
 

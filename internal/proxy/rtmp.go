@@ -201,13 +201,13 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 	defer cancel()
 
 	var backend *rtmpClientToBackend
+	// On cancel, only close the client conn to unblock handshake/reads.
+	// Backend is closed solely via defer backend.Close() after proxy goroutines
+	// finish, avoiding a concurrent double-close race on tcpConn.
 	if true {
 		go func() {
 			<-ctx.Done()
 			conn.Close()
-			if backend != nil {
-				backend.Close()
-			}
 		}()
 	}
 
@@ -475,6 +475,11 @@ const (
 
 // rtmpClientToBackend is an RTMP client to proxy the RTMP stream to backend.
 type rtmpClientToBackend struct {
+	// Guards tcpConn/client/playResponses across Close, connect retry cleanup,
+	// and concurrent Close callers.
+	closeMu sync.Mutex
+	// Ensures Close is idempotent when invoked more than once.
+	closeOnce sync.Once
 	// The underlayer connection to backend. Stored as io.ReadWriteCloser so tests
 	// can inject a fake connection by overriding dial.
 	tcpConn io.ReadWriteCloser
@@ -520,13 +525,18 @@ func newRTMPClientToBackend(opts ...func(*rtmpClientToBackend)) *rtmpClientToBac
 }
 
 func (v *rtmpClientToBackend) Close() error {
-	v.closeBackendTCP()
+	v.closeOnce.Do(func() {
+		v.closeBackendTCP()
+	})
 	return nil
 }
 
 func (v *rtmpClientToBackend) closeBackendTCP() {
+	v.closeMu.Lock()
+	defer v.closeMu.Unlock()
+
 	if v.tcpConn != nil {
-		v.tcpConn.Close()
+		_ = v.tcpConn.Close()
 		v.tcpConn = nil
 	}
 	v.client = nil
@@ -640,17 +650,19 @@ func (v *rtmpClientToBackend) connectToBackend(ctx context.Context, backend *lb.
 	if err != nil {
 		return nil, errors.Wrapf(err, "dial backend ip=%v, port=%v, srs=%v", backend.IP, rtmpPort, backend)
 	}
+
+	v.closeMu.Lock()
 	v.tcpConn = c
+	hs := v.newHandshake()
+	client := v.newProtocol(c)
+	v.client = client
+	v.closeMu.Unlock()
 
 	defer func() {
 		if err != nil {
 			v.closeBackendTCP()
 		}
 	}()
-
-	hs := v.newHandshake()
-	client := v.newProtocol(c)
-	v.client = client
 
 	// Simple RTMP handshake with server.
 	if err := hs.WriteC0S0(c); err != nil {
