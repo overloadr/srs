@@ -403,8 +403,7 @@ func (v *SRTConnection) connectBackend(ctx context.Context, streamID string) err
 		return errors.Wrapf(err, "build stream url %v", streamID)
 	}
 
-	// Pick a backend SRS server to proxy the SRT stream.
-	backend, err := v.loadBalancer.Pick(ctx, streamURL)
+	backend, err := pickStreamOrigin(ctx, v.loadBalancer, streamURL)
 	if err != nil {
 		return errors.Wrapf(err, "pick backend for %v", streamURL)
 	}
@@ -427,6 +426,7 @@ func (v *SRTConnection) connectBackend(ctx context.Context, streamID string) err
 	}
 	v.backendUDP = backendUDP
 
+	bindStreamOrigin(ctx, v.loadBalancer, streamURL, backend)
 	return nil
 }
 

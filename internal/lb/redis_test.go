@@ -348,6 +348,37 @@ func TestRedisLB_Pick_StickyHit(t *testing.T) {
 	}
 }
 
+func TestRedisLB_Pick_ResolvesDeviceAfterServerKeyGone(t *testing.T) {
+	old := &OriginServer{DeviceID: "origin-1", IP: "10.0.0.1", ServerID: "old", ServiceID: "svc", PID: "1"}
+	live := &OriginServer{DeviceID: "origin-1", IP: "10.0.0.1", ServerID: "new", ServiceID: "svc2", PID: "1", UpdatedAt: time.Now()}
+	liveJSON, _ := json.Marshal(live)
+	binding, _ := json.Marshal(newStreamBinding(old, "srs-proxy-server:old-svc-1"))
+
+	fake := &redisclientfakes.FakeRedisClient{}
+	fake.SetReturns(statusCmd(nil))
+	lb := newRedisLB(fake)
+	streamKey := lb.redisKeyURL("url1")
+	deviceKey := lb.redisKeyDevice("origin-1")
+
+	fake.GetStub = func(ctx context.Context, key string) *redis.StringCmd {
+		switch key {
+		case streamKey:
+			return stringOK(binding)
+		case deviceKey:
+			return stringOK(liveJSON)
+		}
+		return stringErr(fmt.Errorf("nil"))
+	}
+
+	got, err := lb.Pick(context.Background(), "url1")
+	if err != nil {
+		t.Fatalf("Pick: %v", err)
+	}
+	if got.ID() != live.ID() {
+		t.Fatalf("Pick returned %v, want live %v", got.ID(), live.ID())
+	}
+}
+
 func TestRedisLB_Pick_StickyBadJSON(t *testing.T) {
 	fake := &redisclientfakes.FakeRedisClient{}
 	lb := newRedisLB(fake)
@@ -445,9 +476,8 @@ func TestRedisLB_Pick_ScanSuccess(t *testing.T) {
 	if got.ID() != server.ID() {
 		t.Fatalf("Pick returned %v", got)
 	}
-	// Pick should also store the picked-mapping.
-	if fake.SetCallCount() != 1 {
-		t.Fatalf("expected 1 Set call to store picked mapping, got %d", fake.SetCallCount())
+	if fake.SetCallCount() != 0 {
+		t.Fatalf("random Pick must not persist mapping, got %d Set calls", fake.SetCallCount())
 	}
 }
 
@@ -490,9 +520,15 @@ func TestRedisLB_Pick_StoreMappingFails(t *testing.T) {
 		return stringErr(fmt.Errorf("nil"))
 	}
 
-	_, err := lb.Pick(context.Background(), "url1")
-	if err == nil || !strings.Contains(err.Error(), "set failed") {
-		t.Fatalf("expected set-mapping error, got %v", err)
+	got, err := lb.Pick(context.Background(), "url1")
+	if err != nil {
+		t.Fatalf("Pick should not persist a random mapping, got %v", err)
+	}
+	if got.ID() != server.ID() {
+		t.Fatalf("Pick returned %v", got)
+	}
+	if fake.SetCallCount() != 0 {
+		t.Fatalf("random Pick must not persist mapping, got %d Set calls", fake.SetCallCount())
 	}
 }
 
@@ -649,6 +685,9 @@ func TestRedisLB_KeyHelpers(t *testing.T) {
 		{lb.redisKeyRTC("url"), "srs-proxy-rtc:url"},
 		{lb.redisKeySPBHID("s"), "srs-proxy-spbhid:s"},
 		{lb.redisKeyHLS("url"), "srs-proxy-hls:url"},
+		{lb.redisKeyURL("url"), "srs-proxy-url:url"},
+		{lb.redisKeyDevice("dev"), "srs-proxy-device:dev"},
+		{lb.redisKeyIP("1.2.3.4"), "srs-proxy-ip:1.2.3.4"},
 		{lb.redisKeyServer("id"), "srs-proxy-server:id"},
 		{lb.redisKeyServers(), "srs-proxy-all-servers"},
 	} {

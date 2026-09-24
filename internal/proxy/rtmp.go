@@ -595,8 +595,12 @@ func (v *rtmpClientToBackend) connectWithRetry(ctx context.Context, tcUrl, strea
 		return nil, errors.Wrapf(err, "build stream url %v/%v", tcUrl, streamName)
 	}
 
-	// Pick a backend SRS server to proxy the RTMP stream.
-	backend, err := v.loadBalancer.Pick(ctx, streamURL)
+	var backend *lb.OriginServer
+	if v.typ == RTMPClientTypeViewer {
+		backend, err = pickStreamOrigin(ctx, v.loadBalancer, streamURL)
+	} else {
+		backend, err = v.loadBalancer.Pick(ctx, streamURL)
+	}
 	if err != nil {
 		return nil, errors.Wrapf(err, "pick backend for %v", streamURL)
 	}
@@ -622,11 +626,25 @@ func (v *rtmpClientToBackend) connectWithRetry(ctx context.Context, tcUrl, strea
 				return nil, errors.Wrapf(err, "connect to repicked backend %v", newBackend.ID())
 			}
 			backend = newBackend
+		} else if v.typ == RTMPClientTypeViewer {
+			for _, other := range otherLiveOrigins(ctx, v.loadBalancer, backend) {
+				v.closeBackendTCP()
+				info, err = v.connectToBackend(ctx, other, tcUrl, streamName, streamURL)
+				if err == nil {
+					logger.Warn(ctx, "RTMP play %v rebound from %+v to %+v", streamURL, backend, other)
+					backend = other
+					break
+				}
+			}
+			if err != nil {
+				return nil, err
+			}
 		} else {
 			return nil, err
 		}
 	}
 
+	bindStreamOrigin(ctx, v.loadBalancer, streamURL, backend)
 	return info, nil
 }
 

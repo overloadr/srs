@@ -101,6 +101,33 @@ type FakeOriginLoadBalancer struct {
 		result1 *lb.OriginServer
 		result2 error
 	}
+	LookupStub        func(context.Context, string) (*lb.OriginServer, error)
+	lookupMutex       sync.RWMutex
+	lookupArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+	}
+	lookupReturns struct {
+		result1 *lb.OriginServer
+		result2 error
+	}
+	lookupReturnsOnCall map[int]struct {
+		result1 *lb.OriginServer
+		result2 error
+	}
+	BindStub        func(context.Context, string, *lb.OriginServer) error
+	bindMutex       sync.RWMutex
+	bindArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 *lb.OriginServer
+	}
+	bindReturns struct {
+		result1 error
+	}
+	bindReturnsOnCall map[int]struct {
+		result1 error
+	}
 	RepickStub        func(context.Context, string, string) (*lb.OriginServer, error)
 	repickMutex       sync.RWMutex
 	repickArgsForCall []struct {
@@ -593,6 +620,71 @@ func (fake *FakeOriginLoadBalancer) PickReturnsOnCall(i int, result1 *lb.OriginS
 	}{result1, result2}
 }
 
+func (fake *FakeOriginLoadBalancer) Lookup(arg1 context.Context, arg2 string) (*lb.OriginServer, error) {
+	fake.lookupMutex.Lock()
+	ret, specificReturn := fake.lookupReturnsOnCall[len(fake.lookupArgsForCall)]
+	fake.lookupArgsForCall = append(fake.lookupArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.LookupStub
+	fakeReturns := fake.lookupReturns
+	fake.recordInvocation("Lookup", []interface{}{arg1, arg2})
+	fake.lookupMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeOriginLoadBalancer) LookupCallCount() int {
+	fake.lookupMutex.RLock()
+	defer fake.lookupMutex.RUnlock()
+	return len(fake.lookupArgsForCall)
+}
+
+func (fake *FakeOriginLoadBalancer) LookupCalls(stub func(context.Context, string) (*lb.OriginServer, error)) {
+	fake.lookupMutex.Lock()
+	defer fake.lookupMutex.Unlock()
+	fake.LookupStub = stub
+}
+
+func (fake *FakeOriginLoadBalancer) LookupArgsForCall(i int) (context.Context, string) {
+	fake.lookupMutex.RLock()
+	defer fake.lookupMutex.RUnlock()
+	argsForCall := fake.lookupArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeOriginLoadBalancer) LookupReturns(result1 *lb.OriginServer, result2 error) {
+	fake.lookupMutex.Lock()
+	defer fake.lookupMutex.Unlock()
+	fake.LookupStub = nil
+	fake.lookupReturns = struct {
+		result1 *lb.OriginServer
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeOriginLoadBalancer) LookupReturnsOnCall(i int, result1 *lb.OriginServer, result2 error) {
+	fake.lookupMutex.Lock()
+	defer fake.lookupMutex.Unlock()
+	fake.LookupStub = nil
+	if fake.lookupReturnsOnCall == nil {
+		fake.lookupReturnsOnCall = make(map[int]struct {
+			result1 *lb.OriginServer
+			result2 error
+		})
+	}
+	fake.lookupReturnsOnCall[i] = struct {
+		result1 *lb.OriginServer
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeOriginLoadBalancer) Repick(arg1 context.Context, arg2 string, arg3 string) (*lb.OriginServer, error) {
 	fake.repickMutex.Lock()
 	ret, specificReturn := fake.repickReturnsOnCall[len(fake.repickArgsForCall)]
@@ -780,6 +872,69 @@ func (fake *FakeOriginLoadBalancer) UpdateReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.updateReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeOriginLoadBalancer) Bind(arg1 context.Context, arg2 string, arg3 *lb.OriginServer) error {
+	fake.bindMutex.Lock()
+	ret, specificReturn := fake.bindReturnsOnCall[len(fake.bindArgsForCall)]
+	fake.bindArgsForCall = append(fake.bindArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 *lb.OriginServer
+	}{arg1, arg2, arg3})
+	stub := fake.BindStub
+	fakeReturns := fake.bindReturns
+	fake.recordInvocation("Bind", []interface{}{arg1, arg2, arg3})
+	fake.bindMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeOriginLoadBalancer) BindCallCount() int {
+	fake.bindMutex.RLock()
+	defer fake.bindMutex.RUnlock()
+	return len(fake.bindArgsForCall)
+}
+
+func (fake *FakeOriginLoadBalancer) BindCalls(stub func(context.Context, string, *lb.OriginServer) error) {
+	fake.bindMutex.Lock()
+	defer fake.bindMutex.Unlock()
+	fake.BindStub = stub
+}
+
+func (fake *FakeOriginLoadBalancer) BindArgsForCall(i int) (context.Context, string, *lb.OriginServer) {
+	fake.bindMutex.RLock()
+	defer fake.bindMutex.RUnlock()
+	argsForCall := fake.bindArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeOriginLoadBalancer) BindReturns(result1 error) {
+	fake.bindMutex.Lock()
+	defer fake.bindMutex.Unlock()
+	fake.BindStub = nil
+	fake.bindReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeOriginLoadBalancer) BindReturnsOnCall(i int, result1 error) {
+	fake.bindMutex.Lock()
+	defer fake.bindMutex.Unlock()
+	fake.BindStub = nil
+	if fake.bindReturnsOnCall == nil {
+		fake.bindReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.bindReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }

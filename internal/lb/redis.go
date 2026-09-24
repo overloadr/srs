@@ -97,6 +97,9 @@ func (v *redisLoadBalancer) Update(ctx context.Context, server *OriginServer) er
 	if err = v.rdb.Set(ctx, key, b, ServerAliveDuration).Err(); err != nil {
 		return errors.Wrapf(err, "set key=%v server %+v", key, server)
 	}
+	if err = v.setIdentityIndexes(ctx, server, b); err != nil {
+		return err
+	}
 
 	// Query all servers from redis, in json string.
 	var serverKeys []string
@@ -161,39 +164,96 @@ func (v *redisLoadBalancer) List(ctx context.Context) ([]*OriginServer, error) {
 }
 
 func (v *redisLoadBalancer) Pick(ctx context.Context, streamURL string) (*OriginServer, error) {
-	key := fmt.Sprintf("srs-proxy-url:%v", streamURL)
-
-	// Always proxy to the same server for the same stream URL.
-	if serverKey, err := v.rdb.Get(ctx, key).Result(); err == nil {
-		// If server not exists, ignore and pick another server for the stream URL.
-		if b, err := v.rdb.Get(ctx, serverKey).Bytes(); err == nil && len(b) > 0 {
-			var server OriginServer
-			if err := json.Unmarshal(b, &server); err != nil {
-				return nil, errors.Wrapf(err, "unmarshal key=%v server %v", key, string(b))
-			}
-
-			// TODO: If server fail, we should migrate the streams to another server.
-			return &server, nil
-		}
+	if server, err := v.Lookup(ctx, streamURL); err != nil {
+		return nil, err
+	} else if server != nil {
+		_ = v.Bind(ctx, streamURL, server)
+		return server, nil
 	}
 
 	return v.pickNewServer(ctx, streamURL, "")
 }
 
+func (v *redisLoadBalancer) Lookup(ctx context.Context, streamURL string) (*OriginServer, error) {
+	return v.resolveBoundServer(ctx, streamURL)
+}
+
+func (v *redisLoadBalancer) Bind(ctx context.Context, streamURL string, server *OriginServer) error {
+	if streamURL == "" || server == nil {
+		return nil
+	}
+	payload, err := json.Marshal(newStreamBinding(server, v.redisKeyServer(server.ID())))
+	if err != nil {
+		return errors.Wrapf(err, "marshal binding for %v", streamURL)
+	}
+	key := v.redisKeyURL(streamURL)
+	if err = v.rdb.Set(ctx, key, payload, 0).Err(); err != nil {
+		return errors.Wrapf(err, "set key=%v binding %v", key, string(payload))
+	}
+	return nil
+}
+
 func (v *redisLoadBalancer) Repick(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
-	key := fmt.Sprintf("srs-proxy-url:%v", streamURL)
-
-	// Clear the current mapping for the stream URL.
-	v.rdb.Del(ctx, key)
-
-	// Pick a new server, excluding the failed one.
+	v.rdb.Del(ctx, v.redisKeyURL(streamURL))
 	return v.pickNewServer(ctx, streamURL, excludeServerID)
 }
 
-func (v *redisLoadBalancer) pickNewServer(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
-	key := fmt.Sprintf("srs-proxy-url:%v", streamURL)
+func (v *redisLoadBalancer) resolveBoundServer(ctx context.Context, streamURL string) (*OriginServer, error) {
+	raw, err := v.rdb.Get(ctx, v.redisKeyURL(streamURL)).Bytes()
+	if err != nil || len(raw) == 0 {
+		return nil, nil
+	}
 
-	// Query all servers from redis, in json string.
+	binding := parseStreamBinding(raw)
+	if binding.Empty() {
+		return nil, nil
+	}
+
+	if binding.DeviceID != "" {
+		if server, err := v.loadServerJSON(ctx, v.redisKeyDevice(binding.DeviceID)); err != nil {
+			return nil, err
+		} else if server != nil {
+			return server, nil
+		}
+	}
+	if binding.IP != "" {
+		if server, err := v.loadServerJSON(ctx, v.redisKeyIP(binding.IP)); err != nil {
+			return nil, err
+		} else if server != nil {
+			return server, nil
+		}
+	}
+	if binding.ServerKey != "" {
+		if server, err := v.loadServerJSON(ctx, binding.ServerKey); err != nil {
+			return nil, err
+		} else if server != nil {
+			return server, nil
+		}
+	}
+
+	servers, err := v.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return selectMatchingOrigin(servers, binding), nil
+}
+
+func (v *redisLoadBalancer) loadServerJSON(ctx context.Context, key string) (*OriginServer, error) {
+	if key == "" {
+		return nil, nil
+	}
+	b, err := v.rdb.Get(ctx, key).Bytes()
+	if err != nil || len(b) == 0 {
+		return nil, nil
+	}
+	var server OriginServer
+	if err := json.Unmarshal(b, &server); err != nil {
+		return nil, errors.Wrapf(err, "unmarshal key=%v server %v", key, string(b))
+	}
+	return &server, nil
+}
+
+func (v *redisLoadBalancer) pickNewServer(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
 	var serverKeys []string
 	if b, err := v.rdb.Get(ctx, v.redisKeyServers()).Bytes(); err == nil {
 		if err := json.Unmarshal(b, &serverKeys); err != nil {
@@ -201,46 +261,59 @@ func (v *redisLoadBalancer) pickNewServer(ctx context.Context, streamURL string,
 		}
 	}
 
-	// No server found, failed.
 	if len(serverKeys) == 0 {
 		return nil, fmt.Errorf("no server available for %v", streamURL)
 	}
 
-	// All server should be alive, if not, should have been removed by redis. So we only
-	// random pick one that is always available. Use global rand which is thread-safe since Go 1.20.
-	var serverKey string
-	var server OriginServer
-	for i := 0; i < 3; i++ {
-		tryServerKey := serverKeys[rand.Intn(len(serverKeys))]
-		
-		// Skip the excluded server.
-		if excludeServerID != "" {
-			expectedKey := v.redisKeyServer(excludeServerID)
-			if tryServerKey == expectedKey {
-				continue
-			}
+	excludeKey := ""
+	if excludeServerID != "" {
+		excludeKey = v.redisKeyServer(excludeServerID)
+	}
+
+	order := append([]string(nil), serverKeys...)
+	rand.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+
+	var firstUnmarshalErr error
+	for _, tryServerKey := range order {
+		if excludeKey != "" && tryServerKey == excludeKey {
+			continue
 		}
-		
 		b, err := v.rdb.Get(ctx, tryServerKey).Bytes()
-		if err == nil && len(b) > 0 {
-			if err := json.Unmarshal(b, &server); err != nil {
-				return nil, errors.Wrapf(err, "unmarshal key=%v server %v", serverKey, string(b))
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		var server OriginServer
+		if err := json.Unmarshal(b, &server); err != nil {
+			if firstUnmarshalErr == nil {
+				firstUnmarshalErr = errors.Wrapf(err, "unmarshal key=%v server %v", tryServerKey, string(b))
 			}
+			continue
+		}
+		return &server, nil
+	}
+	if firstUnmarshalErr != nil {
+		return nil, firstUnmarshalErr
+	}
+	return nil, errors.Errorf("no server available in %v for %v", serverKeys, streamURL)
+}
 
-			serverKey = tryServerKey
-			break
+func (v *redisLoadBalancer) setIdentityIndexes(ctx context.Context, server *OriginServer, raw []byte) error {
+	if server == nil || len(raw) == 0 {
+		return nil
+	}
+	if server.DeviceID != "" {
+		key := v.redisKeyDevice(server.DeviceID)
+		if err := v.rdb.Set(ctx, key, raw, ServerAliveDuration).Err(); err != nil {
+			return errors.Wrapf(err, "set key=%v device index", key)
 		}
 	}
-	if serverKey == "" {
-		return nil, errors.Errorf("no server available in %v for %v", serverKeys, streamURL)
+	if server.IP != "" {
+		key := v.redisKeyIP(server.IP)
+		if err := v.rdb.Set(ctx, key, raw, ServerAliveDuration).Err(); err != nil {
+			return errors.Wrapf(err, "set key=%v ip index", key)
+		}
 	}
-
-	// Update the picked server for the stream URL.
-	if err := v.rdb.Set(ctx, key, []byte(serverKey), 0).Err(); err != nil {
-		return nil, errors.Wrapf(err, "set key=%v server %v", key, serverKey)
-	}
-
-	return &server, nil
+	return nil
 }
 
 func (v *redisLoadBalancer) LoadHLSBySPBHID(ctx context.Context, spbhid string) (HLSPlayStream, error) {
@@ -334,6 +407,18 @@ func (v *redisLoadBalancer) DeleteWebRTCByUfrag(ctx context.Context, ufrag strin
 	}
 	_ = v.rdb.Del(ctx, key)
 	return nil
+}
+
+func (v *redisLoadBalancer) redisKeyURL(streamURL string) string {
+	return fmt.Sprintf("srs-proxy-url:%v", streamURL)
+}
+
+func (v *redisLoadBalancer) redisKeyDevice(deviceID string) string {
+	return fmt.Sprintf("srs-proxy-device:%v", deviceID)
+}
+
+func (v *redisLoadBalancer) redisKeyIP(ip string) string {
+	return fmt.Sprintf("srs-proxy-ip:%v", ip)
 }
 
 func (v *redisLoadBalancer) redisKeyUfrag(ufrag string) string {

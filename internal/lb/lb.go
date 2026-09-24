@@ -148,6 +148,12 @@ type OriginService interface {
 	List(ctx context.Context) ([]*OriginServer, error)
 	// Pick a backend server for the specified stream URL.
 	Pick(ctx context.Context, streamURL string) (*OriginServer, error)
+	// Lookup returns the origin currently bound to streamURL, or nil if none.
+	// It does not create or overwrite a mapping.
+	Lookup(ctx context.Context, streamURL string) (*OriginServer, error)
+	// Bind records that streamURL is served by server using restart-stable
+	// identity (device_id / IP), so later Pick follows the origin across restarts.
+	Bind(ctx context.Context, streamURL string, server *OriginServer) error
 	// Repick clears the current mapping for the stream URL and picks a new backend server.
 	// This is used when the previously picked server becomes unreachable.
 	// If excludeServerID is provided, that server will be excluded from selection.

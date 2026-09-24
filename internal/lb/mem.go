@@ -95,12 +95,49 @@ func (v *memoryLoadBalancer) List(ctx context.Context) ([]*OriginServer, error) 
 }
 
 func (v *memoryLoadBalancer) Pick(ctx context.Context, streamURL string) (*OriginServer, error) {
-	// Always proxy to the same server for the same stream URL.
-	if server, ok := v.picked.Load(streamURL); ok {
+	if server, err := v.Lookup(ctx, streamURL); err != nil {
+		return nil, err
+	} else if server != nil {
+		v.picked.Store(streamURL, server)
 		return server, nil
 	}
 
 	return v.pickNewServer(ctx, streamURL, "")
+}
+
+func (v *memoryLoadBalancer) Lookup(ctx context.Context, streamURL string) (*OriginServer, error) {
+	bound, ok := v.picked.Load(streamURL)
+	if !ok {
+		return nil, nil
+	}
+	return v.resolveBoundServer(bound), nil
+}
+
+func (v *memoryLoadBalancer) Bind(ctx context.Context, streamURL string, server *OriginServer) error {
+	if streamURL == "" || server == nil {
+		return nil
+	}
+	v.picked.Store(streamURL, server)
+	return nil
+}
+
+func (v *memoryLoadBalancer) resolveBoundServer(bound *OriginServer) *OriginServer {
+	if bound == nil {
+		return nil
+	}
+	binding := newStreamBinding(bound, "")
+	var servers []*OriginServer
+	v.servers.Range(func(_ string, server *OriginServer) bool {
+		servers = append(servers, server)
+		return true
+	})
+	if matched := selectMatchingOrigin(servers, binding); matched != nil {
+		return matched
+	}
+	if current, ok := v.servers.Load(bound.ID()); ok {
+		return current
+	}
+	return nil
 }
 
 func (v *memoryLoadBalancer) Repick(ctx context.Context, streamURL string, excludeServerID string) (*OriginServer, error) {
@@ -145,7 +182,6 @@ func (v *memoryLoadBalancer) pickNewServer(ctx context.Context, streamURL string
 	// Pick a server randomly from servers. Use global rand which is thread-safe since Go 1.20.
 	// For older Go versions, this is still safe as we're only reading from the servers slice.
 	server := servers[rand.Intn(len(servers))]
-	v.picked.Store(streamURL, server)
 	return server, nil
 }
 

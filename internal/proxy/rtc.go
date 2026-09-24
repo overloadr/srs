@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"strconv"
@@ -27,7 +26,24 @@ import (
 )
 
 // defaultWebRTCIdleTimeout is used when PROXY_WEBRTC_IDLE_TIMEOUT is unset or invalid.
+// Idle is measured from the last client→proxy UDP packet, not backend media.
 const defaultWebRTCIdleTimeout = 120 * time.Second
+
+// defaultBackendAPITimeout bounds WHIP/WHEP SDP and DELETE requests to origin.
+const defaultBackendAPITimeout = 10 * time.Second
+
+// hopByHopHeaders are not forwarded from origin HTTP API responses.
+var hopByHopHeaders = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailers":            true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+	"Content-Length":      true, // body may be rewritten (candidate port)
+}
 
 // WebRTCProxyServer is the proxy for SRS WebRTC server via WHIP or WHEP protocol. It will figure out
 // which backend server to proxy to. It will also replace the UDP port to the proxy server's in the
@@ -56,7 +72,8 @@ type webRTCProxyServer struct {
 	// TODO: Support fast earch by uint64 address.
 	addresses sync.Map[string, *rtcConnection]
 
-	// Idle timeout for WebRTC media sessions. Zero disables idle eviction.
+	// Idle timeout for WebRTC media sessions, based on client UDP only.
+	// Zero disables idle eviction.
 	idleTimeout time.Duration
 	// activeConnections tracks live WebRTC media sessions with a backend UDP socket.
 	activeConnections atomic.Int64
@@ -68,6 +85,9 @@ type webRTCProxyServer struct {
 	// SRS server. Defaults to "http://<ip>:<api-port><path>?<query>"; tests may
 	// override to redirect requests to an httptest.Server.
 	backendURL func(backend *lb.OriginServer, r *http.Request) (string, error)
+
+	// httpClient forwards WHIP/WHEP HTTP to origin. Tests may override.
+	httpClient *http.Client
 
 	// listenUDP opens the UDP listener for the WebRTC server. Defaults to a real
 	// net.ListenUDP on the resolved endpoint; tests may override via a functional
@@ -82,6 +102,7 @@ func NewWebRTCProxyServer(environment env.ProxyEnvironment, loadBalancer lb.Orig
 		usernames:    sync.NewMap[string, *rtcConnection](),
 		addresses:    sync.NewMap[string, *rtcConnection](),
 		idleTimeout:  parseWebRTCIdleTimeout(environment.WebRTCIdleTimeout()),
+		httpClient:   newWebRTCBackendHTTPClient(),
 	}
 
 	// Default listenUDP: resolve the endpoint and open a real UDP socket.
@@ -127,6 +148,21 @@ func parseWebRTCIdleTimeout(raw string) time.Duration {
 	return d
 }
 
+func newWebRTCBackendHTTPClient() *http.Client {
+	return &http.Client{Timeout: defaultBackendAPITimeout}
+}
+
+func copyResponseHeaders(dst, src http.Header) {
+	for k, vs := range src {
+		if hopByHopHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
+		for _, vv := range vs {
+			dst.Add(k, vv)
+		}
+	}
+}
+
 func (v *webRTCProxyServer) Close() error {
 	v.usernames.Range(func(_ string, conn *rtcConnection) bool {
 		_ = conn.Close()
@@ -142,49 +178,24 @@ func (v *webRTCProxyServer) Close() error {
 }
 
 func (v *webRTCProxyServer) HandleApiForWHIP(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	defer r.Body.Close()
-	ctx = logger.WithContext(ctx)
-
-	// Always allow CORS for all requests.
-	if ok := utils.ApiCORS(ctx, w, r); ok {
-		return nil
-	}
-
-	// Read remote SDP offer from body.
-	remoteSDPOffer, err := io.ReadAll(r.Body)
-	if err != nil {
-		return errors.Wrapf(err, "read remote sdp offer")
-	}
-
-	// Build the stream URL in vhost/app/stream schema.
-	unifiedURL, fullURL := utils.ConvertURLToStreamURL(r)
-	logger.Debug(ctx, "Got WebRTC WHIP from %v with %vB offer for %v", r.RemoteAddr, len(remoteSDPOffer), fullURL)
-
-	streamURL, err := utils.BuildStreamURL(unifiedURL)
-	if err != nil {
-		return errors.Wrapf(err, "build stream url %v", unifiedURL)
-	}
-
-	// Pick a backend SRS server to proxy the RTMP stream.
-	backend, err := v.loadBalancer.Pick(ctx, streamURL)
-	if err != nil {
-		return errors.Wrapf(err, "pick backend for %v", streamURL)
-	}
-
-	if err = v.proxyApiToBackend(ctx, w, r, backend, string(remoteSDPOffer), streamURL); err != nil {
-		return errors.Wrapf(err, "serve %v with %v by backend %+v", fullURL, streamURL, backend)
-	}
-
-	return nil
+	return v.handleWhipWhep(ctx, w, r, "WHIP")
 }
 
 func (v *webRTCProxyServer) HandleApiForWHEP(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	return v.handleWhipWhep(ctx, w, r, "WHEP")
+}
+
+func (v *webRTCProxyServer) handleWhipWhep(ctx context.Context, w http.ResponseWriter, r *http.Request, kind string) error {
 	defer r.Body.Close()
 	ctx = logger.WithContext(ctx)
 
 	// Always allow CORS for all requests.
 	if ok := utils.ApiCORS(ctx, w, r); ok {
 		return nil
+	}
+
+	if r.Method == http.MethodDelete {
+		return v.proxyDeleteToBackend(ctx, w, r)
 	}
 
 	// Read remote SDP offer from body.
@@ -195,23 +206,86 @@ func (v *webRTCProxyServer) HandleApiForWHEP(ctx context.Context, w http.Respons
 
 	// Build the stream URL in vhost/app/stream schema.
 	unifiedURL, fullURL := utils.ConvertURLToStreamURL(r)
-	logger.Debug(ctx, "Got WebRTC WHEP from %v with %vB offer for %v", r.RemoteAddr, len(remoteSDPOffer), fullURL)
+	logger.Debug(ctx, "Got WebRTC %v from %v with %vB offer for %v", kind, r.RemoteAddr, len(remoteSDPOffer), fullURL)
 
 	streamURL, err := utils.BuildStreamURL(unifiedURL)
 	if err != nil {
 		return errors.Wrapf(err, "build stream url %v", unifiedURL)
 	}
 
-	// Pick a backend SRS server to proxy the RTMP stream.
-	backend, err := v.loadBalancer.Pick(ctx, streamURL)
+	// Pick a backend SRS server to proxy the RTC stream.
+	backend, err := pickStreamOrigin(ctx, v.loadBalancer, streamURL)
 	if err != nil {
 		return errors.Wrapf(err, "pick backend for %v", streamURL)
 	}
 
 	if err = v.proxyApiToBackend(ctx, w, r, backend, string(remoteSDPOffer), streamURL); err != nil {
+		if shouldRetryOtherOrigin(err) {
+			for _, other := range otherLiveOrigins(ctx, v.loadBalancer, backend) {
+				if retryErr := v.proxyApiToBackend(ctx, w, r, other, string(remoteSDPOffer), streamURL); retryErr == nil {
+					logger.Warn(ctx, "WebRTC %v rebound from %+v to %+v", streamURL, backend, other)
+					bindStreamOrigin(ctx, v.loadBalancer, streamURL, other)
+					return nil
+				}
+			}
+		}
 		return errors.Wrapf(err, "serve %v with %v by backend %+v", fullURL, streamURL, backend)
 	}
 
+	bindStreamOrigin(ctx, v.loadBalancer, streamURL, backend)
+	return nil
+}
+
+func (v *webRTCProxyServer) proxyDeleteToBackend(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	session := r.URL.Query().Get("session")
+	if session != "" {
+		if conn, ok := v.usernames.Load(session); ok {
+			logger.Debug(ctx, "WebRTC DELETE closing local session ufrag=%v stream=%v", conn.Ufrag, conn.StreamURL)
+			_ = conn.Close()
+		} else if loaded, err := v.loadBalancer.LoadWebRTCByUfrag(ctx, session); err == nil && loaded != nil {
+			if conn, ok := loaded.(*rtcConnection); ok {
+				logger.Debug(ctx, "WebRTC DELETE closing LB session ufrag=%v stream=%v", conn.Ufrag, conn.StreamURL)
+				_ = conn.Close()
+			}
+		}
+	}
+
+	unifiedURL, fullURL := utils.ConvertURLToStreamURL(r)
+	streamURL, err := utils.BuildStreamURL(unifiedURL)
+	if err != nil {
+		return errors.Wrapf(err, "build stream url %v", unifiedURL)
+	}
+
+	backend, err := pickStreamOrigin(ctx, v.loadBalancer, streamURL)
+	if err != nil {
+		return errors.Wrapf(err, "pick backend for DELETE %v", fullURL)
+	}
+
+	backendURL, err := v.backendURL(backend, r)
+	if err != nil {
+		return errors.Wrapf(err, "build backend url")
+	}
+
+	reqCtx, cancel := context.WithTimeout(r.Context(), defaultBackendAPITimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodDelete, backendURL, http.NoBody)
+	if err != nil {
+		return errors.Wrapf(err, "create DELETE request to %v", backendURL)
+	}
+
+	resp, err := v.httpClient.Do(req)
+	if err != nil {
+		return errors.Errorf("do DELETE to %v EOF", backendURL)
+	}
+	defer resp.Body.Close()
+
+	copyResponseHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return errors.Wrapf(err, "copy DELETE response from %v", backendURL)
+	}
+
+	logger.Debug(ctx, "WebRTC DELETE proxied to %v status=%v session=%v", backendURL, resp.StatusCode, session)
 	return nil
 }
 
@@ -226,12 +300,14 @@ func (v *webRTCProxyServer) proxyApiToBackend(
 		return errors.Wrapf(err, "build backend url")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, r.Method, backendURL, strings.NewReader(remoteSDPOffer))
+	reqCtx, cancel := context.WithTimeout(r.Context(), defaultBackendAPITimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, r.Method, backendURL, strings.NewReader(remoteSDPOffer))
 	if err != nil {
 		return errors.Wrapf(err, "create request to %v", backendURL)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := v.httpClient.Do(req)
 	if err != nil {
 		return errors.Errorf("do request to %v EOF", backendURL)
 	}
@@ -241,16 +317,8 @@ func (v *webRTCProxyServer) proxyApiToBackend(
 		return errors.Errorf("proxy api to %v failed, status=%v", backendURL, resp.Status)
 	}
 
-	// Copy all headers from backend to client.
-	w.WriteHeader(resp.StatusCode)
-	for k, v := range resp.Header {
-		for _, vv := range v {
-			w.Header().Add(k, vv)
-		}
-	}
-
 	// Parse the local SDP answer from backend.
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return errors.Wrapf(err, "read stream from %v", backendURL)
 	}
@@ -314,7 +382,10 @@ func (v *webRTCProxyServer) proxyApiToBackend(
 		return errors.Wrapf(err, "load or store webrtc %v", streamURL)
 	}
 
-	// Response client with local answer.
+	// Response client with local answer. Copy origin headers first so Location
+	// (WHEP/WHIP DELETE resource) and Content-Type survive WriteHeader.
+	copyResponseHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
 	if _, err = w.Write([]byte(localSDPAnswer)); err != nil {
 		return errors.Wrapf(err, "write local sdp answer %v", localSDPAnswer)
 	}
@@ -417,12 +488,13 @@ func (v *webRTCProxyServer) handleClientUDP(ctx context.Context, addr net.Addr, 
 		return err
 	}
 
-	// Search the connection by addr.
-	if s, ok := v.addresses.Load(addr.String()); ok {
-		connection = s
-	} else if connection != nil {
-		// Cache the address for fast search.
+	// Prefer STUN username when present so a recycled client UDP address cannot
+	// keep routing to a stale session. Address cache is only a fallback for
+	// RTP/RTCP after ICE has bound the 5-tuple.
+	if connection != nil {
 		v.addresses.Store(addr.String(), connection)
+	} else if s, ok := v.addresses.Load(addr.String()); ok {
+		connection = s
 	}
 
 	// If connection is not found, ignore the packet.
@@ -510,9 +582,10 @@ type rtcConnection struct {
 	dialMu stdSync.Mutex
 	// idleMu protects idleTimer.
 	idleMu stdSync.Mutex
-	// idleTimer closes the session after idleTimeout without traffic.
+	// idleTimer closes the session after idleTimeout without client UDP.
 	idleTimer *time.Timer
-	// idleTimeout is the inactivity duration before Close. Zero disables eviction.
+	// idleTimeout is the client inactivity duration before Close. Zero disables eviction.
+	// Backend media does not reset this timer.
 	idleTimeout time.Duration
 	// closed is set once Close starts.
 	closed atomic.Bool
@@ -665,7 +738,8 @@ func (v *rtcConnection) HandlePacket(addr net.Addr, data []byte) error {
 					_ = v.Close()
 					return
 				}
-				v.touch()
+				// Do not touch() here: origin RTP/RTCP would keep the session
+				// alive after the client has gone. Idle is client-driven.
 
 				if _, err = v.listenerUDP.WriteTo(buf[:n], v.clientUDP); err != nil {
 					if !v.closed.Load() {
@@ -703,8 +777,7 @@ func (v *rtcConnection) connectBackend(ctx context.Context) error {
 		return errors.Errorf("connection closed")
 	}
 
-	// Pick a backend SRS server to proxy the RTC stream.
-	backend, err := v.loadBalancer.Pick(ctx, v.StreamURL)
+	backend, err := pickStreamOrigin(ctx, v.loadBalancer, v.StreamURL)
 	if err != nil {
 		return errors.Wrapf(err, "pick backend")
 	}
@@ -732,6 +805,7 @@ func (v *rtcConnection) connectBackend(ctx context.Context) error {
 			v.Ufrag, v.StreamURL, active)
 	}
 
+	bindStreamOrigin(ctx, v.loadBalancer, v.StreamURL, backend)
 	return nil
 }
 

@@ -161,6 +161,9 @@ func TestMemLB_Pick_AliveServer_Sticky(t *testing.T) {
 	if got != s {
 		t.Fatalf("Pick returned %v, want %v", got, s)
 	}
+	if err := lb.Bind(context.Background(), "url1", got); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
 
 	// Second pick for the same URL returns the same server (sticky branch).
 	got2, err := lb.Pick(context.Background(), "url1")
@@ -169,6 +172,39 @@ func TestMemLB_Pick_AliveServer_Sticky(t *testing.T) {
 	}
 	if got2 != got {
 		t.Fatalf("second Pick returned %v, want %v (sticky)", got2, got)
+	}
+}
+
+func TestMemLB_Pick_FollowsDeviceAfterRestart(t *testing.T) {
+	lb := newMem()
+	ctx := context.Background()
+	old := &OriginServer{
+		DeviceID: "origin-1", IP: "10.0.0.1",
+		ServerID: "sid-old", ServiceID: "svc-old", PID: "1",
+		UpdatedAt: time.Now().Add(-time.Minute),
+	}
+	_ = lb.Update(ctx, old)
+	got, err := lb.Pick(ctx, "url1")
+	if err != nil || got.ID() != old.ID() {
+		t.Fatalf("initial Pick: got=%+v err=%v", got, err)
+	}
+	if err := lb.Bind(ctx, "url1", got); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	restarted := &OriginServer{
+		DeviceID: "origin-1", IP: "10.0.0.1",
+		ServerID: "sid-new", ServiceID: "svc-new", PID: "1",
+		UpdatedAt: time.Now(),
+	}
+	_ = lb.Update(ctx, restarted)
+
+	got2, err := lb.Pick(ctx, "url1")
+	if err != nil {
+		t.Fatalf("Pick after restart: %v", err)
+	}
+	if got2.ID() != restarted.ID() {
+		t.Fatalf("Pick after restart returned %v, want restarted %v", got2.ID(), restarted.ID())
 	}
 }
 

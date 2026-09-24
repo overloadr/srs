@@ -472,6 +472,58 @@ func TestRtcConnection_IdleTimeoutClosesBackendUDP(t *testing.T) {
 	t.Fatal("backend UDP was not closed after idle timeout")
 }
 
+func TestRtcConnection_BackendTrafficDoesNotResetIdleTimeout(t *testing.T) {
+	// Origin RTP must not keep a session alive after the client has stopped
+	// sending. Otherwise WHEP zombies accumulate on both proxy and origin.
+	f := newRtcConnFixture()
+	f.lb.PickReturns(&lb.OriginServer{IP: "127.0.0.1", RTC: []string{"18000"}}, nil)
+	f.conn.idleTimeout = 50 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.conn.Initialize(ctx, f.listener)
+
+	if err := f.conn.HandlePacket(&net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 9}, []byte("x")); err != nil {
+		t.Fatalf("HandlePacket: %v", err)
+	}
+	select {
+	case <-f.backend.writes:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for backend write")
+	}
+
+	// Drain listener writes so the backend reader never blocks on WriteTo.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-f.listener.writes:
+			case <-time.After(10 * time.Millisecond):
+				if f.backend.closed.Load() {
+					return
+				}
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.backend.closed.Load() {
+			<-done
+			return
+		}
+		func() {
+			defer func() { _ = recover() }()
+			select {
+			case f.backend.reads <- []byte("rtp"):
+			default:
+			}
+		}()
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("backend UDP stayed open despite only origin media; idle should be client-driven")
+}
+
 func TestParseWebRTCIdleTimeout(t *testing.T) {
 	if got := parseWebRTCIdleTimeout(""); got != defaultWebRTCIdleTimeout {
 		t.Fatalf("empty=%v, want %v", got, defaultWebRTCIdleTimeout)
@@ -627,6 +679,9 @@ func TestNewWebRTCProxyServer_SetsDefaults(t *testing.T) {
 	}
 	if v.backendURL == nil {
 		t.Fatal("backendURL should default to a non-nil factory")
+	}
+	if v.httpClient == nil {
+		t.Fatal("httpClient should default to a non-nil client")
 	}
 }
 
@@ -890,11 +945,14 @@ func TestWebRTCProxyServer_HandleApiForWHIP_HappyPath(t *testing.T) {
 
 	const backendRTCPort = "18000"
 	var backendSawOffer atomic.Bool
+	const location = "/rtc/v1/whip/?action=delete&token=tok&app=live&stream=demo&session=local-ufrag:remote-ufrag"
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if string(body) == sampleSDPOffer {
 			backendSawOffer.Store(true)
 		}
+		w.Header().Set("Location", location)
+		w.Header().Set("Content-Type", "application/sdp")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(sampleSDPAnswer(backendRTCPort)))
 	}))
@@ -936,6 +994,12 @@ func TestWebRTCProxyServer_HandleApiForWHIP_HappyPath(t *testing.T) {
 	if got := stored.GetUfrag(); got != "local-ufrag:remote-ufrag" {
 		t.Fatalf("stored ufrag=%q, want local-ufrag:remote-ufrag", got)
 	}
+	if rec.Header().Get("Location") != location {
+		t.Fatalf("Location=%q, want %q", rec.Header().Get("Location"), location)
+	}
+	if rec.Header().Get("Content-Type") != "application/sdp" {
+		t.Fatalf("Content-Type=%q, want application/sdp", rec.Header().Get("Content-Type"))
+	}
 }
 
 func TestWebRTCProxyServer_HandleApiForWHEP_HappyPath(t *testing.T) {
@@ -962,6 +1026,78 @@ func TestWebRTCProxyServer_HandleApiForWHEP_HappyPath(t *testing.T) {
 	}
 	if f.lb.StoreWebRTCCallCount() != 1 {
 		t.Fatalf("StoreWebRTC called %d times, want 1", f.lb.StoreWebRTCCallCount())
+	}
+}
+
+func TestWebRTCProxyServer_HandleApiForWHEP_DELETEClosesSessionAndForwards(t *testing.T) {
+	f := newWebRTCFixture()
+	const ufrag = "local-ufrag:remote-ufrag"
+
+	var backendMethod atomic.Value
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMethod.Store(r.Method)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	f.server.backendURL = func(b *lb.OriginServer, r *http.Request) (string, error) {
+		return backend.URL + r.URL.Path + "?" + r.URL.RawQuery, nil
+	}
+	f.lb.PickReturns(&lb.OriginServer{IP: "10.0.0.1", API: []string{"1985"}, RTC: []string{"18000"}}, nil)
+
+	closed := atomic.Bool{}
+	conn := newRTCConnection(func(c *rtcConnection) {
+		c.Ufrag = ufrag
+		c.StreamURL = "__defaultVhost__/live/demo"
+	})
+	conn.Initialize(context.Background(), f.listener)
+	conn.onClose = func(c *rtcConnection) {
+		closed.Store(true)
+		f.server.unregisterRTCConnection(c)
+	}
+	f.server.usernames.Store(ufrag, conn)
+
+	req := httptest.NewRequest(http.MethodDelete, "http://example.com/rtc/v1/whep/?app=live&stream=demo&session="+ufrag+"&token=tok", nil)
+	rec := httptest.NewRecorder()
+	if err := f.server.HandleApiForWHEP(context.Background(), rec, req); err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	if !closed.Load() {
+		t.Fatal("local rtcConnection should be closed on DELETE")
+	}
+	if _, ok := f.server.usernames.Load(ufrag); ok {
+		t.Fatal("ufrag should be unregistered after DELETE")
+	}
+	if got, _ := backendMethod.Load().(string); got != http.MethodDelete {
+		t.Fatalf("backend method=%q, want DELETE", got)
+	}
+	if f.lb.StoreWebRTCCallCount() != 0 {
+		t.Fatal("DELETE must not StoreWebRTC")
+	}
+}
+
+func TestWebRTCProxyServer_HandleApiForWHIP_DELETEWithoutSessionStillForwards(t *testing.T) {
+	f := newWebRTCFixture()
+	var backendMethod atomic.Value
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMethod.Store(r.Method)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	f.server.backendURL = func(b *lb.OriginServer, r *http.Request) (string, error) {
+		return backend.URL, nil
+	}
+	f.lb.PickReturns(&lb.OriginServer{IP: "10.0.0.1", API: []string{"1985"}, RTC: []string{"18000"}}, nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "http://example.com/rtc/v1/whip/?app=live&stream=demo&token=tok", nil)
+	rec := httptest.NewRecorder()
+	if err := f.server.HandleApiForWHIP(context.Background(), rec, req); err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	if got, _ := backendMethod.Load().(string); got != http.MethodDelete {
+		t.Fatalf("backend method=%q, want DELETE", got)
 	}
 }
 
@@ -1265,5 +1401,41 @@ func TestWebRTCProxyServer_HandleClientUDP_UsesCachedAddress(t *testing.T) {
 	}
 	if f.lb.LoadWebRTCByUfragCallCount() != 0 {
 		t.Fatal("LB.LoadWebRTCByUfrag should not be called when address is cached")
+	}
+}
+
+func TestWebRTCProxyServer_HandleClientUDP_StunUsernameWinsOverStaleAddress(t *testing.T) {
+	// A recycled UDP 5-tuple must not keep feeding a previous session once a
+	// STUN binding names a different ufrag.
+	f := newWebRTCFixture()
+
+	staleLB := &lbfakes.FakeOriginLoadBalancer{}
+	staleLB.PickReturns(nil, errors.New("stale-session"))
+	stale := newRTCConnection(func(c *rtcConnection) {
+		c.loadBalancer = staleLB
+		c.StreamURL = "vhost/app/old"
+		c.Ufrag = "old:ufrag"
+	})
+	stale.Initialize(context.Background(), f.listener)
+
+	freshLB := &lbfakes.FakeOriginLoadBalancer{}
+	freshLB.PickReturns(nil, errors.New("fresh-session"))
+	fresh := newRTCConnection(func(c *rtcConnection) {
+		c.loadBalancer = freshLB
+		c.StreamURL = "vhost/app/new"
+		c.Ufrag = "L:R"
+	})
+	fresh.Initialize(context.Background(), f.listener)
+	f.server.usernames.Store("L:R", fresh)
+
+	addr := &net.UDPAddr{IP: net.ParseIP("1.2.3.4"), Port: 7007}
+	f.server.addresses.Store(addr.String(), stale)
+
+	err := f.server.handleClientUDP(context.Background(), addr, newStunBindingRequest("L:R"))
+	if err == nil || !strings.Contains(err.Error(), "fresh-session") {
+		t.Fatalf("expected fresh-session err, got %v", err)
+	}
+	if got, ok := f.server.addresses.Load(addr.String()); !ok || got != fresh {
+		t.Fatal("address cache should bind to the STUN-identified session")
 	}
 }

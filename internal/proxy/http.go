@@ -305,15 +305,25 @@ func (v *httpFlvTsConnection) serve(ctx context.Context, w http.ResponseWriter, 
 	}
 
 	// Pick a backend SRS server to proxy the RTMP stream.
-	backend, err := v.loadBalancer.Pick(ctx, streamURL)
+	backend, err := pickStreamOrigin(ctx, v.loadBalancer, streamURL)
 	if err != nil {
 		return errors.Wrapf(err, "pick backend for %v", streamURL)
 	}
 
 	if err = v.serveByBackend(ctx, w, r, backend); err != nil {
+		if shouldRetryOtherOrigin(err) {
+			for _, other := range otherLiveOrigins(ctx, v.loadBalancer, backend) {
+				if retryErr := v.serveByBackend(ctx, w, r, other); retryErr == nil {
+					logger.Warn(ctx, "HTTP stream %v rebound from %+v to %+v", streamURL, backend, other)
+					bindStreamOrigin(ctx, v.loadBalancer, streamURL, other)
+					return nil
+				}
+			}
+		}
 		return errors.Wrapf(err, "serve %v with %v by backend %+v", fullURL, streamURL, backend)
 	}
 
+	bindStreamOrigin(ctx, v.loadBalancer, streamURL, backend)
 	return nil
 }
 
@@ -430,15 +440,25 @@ func (v *hlsPlayStream) serve(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 
 	// Pick a backend SRS server to proxy the RTMP stream.
-	backend, err := v.loadBalancer.Pick(ctx, streamURL)
+	backend, err := pickStreamOrigin(ctx, v.loadBalancer, streamURL)
 	if err != nil {
 		return errors.Wrapf(err, "pick backend for %v", streamURL)
 	}
 
 	if err = v.serveByBackend(ctx, w, r, backend); err != nil {
+		if shouldRetryOtherOrigin(err) {
+			for _, other := range otherLiveOrigins(ctx, v.loadBalancer, backend) {
+				if retryErr := v.serveByBackend(ctx, w, r, other); retryErr == nil {
+					logger.Warn(ctx, "HLS stream %v rebound from %+v to %+v", streamURL, backend, other)
+					bindStreamOrigin(ctx, v.loadBalancer, streamURL, other)
+					return nil
+				}
+			}
+		}
 		return errors.Wrapf(err, "serve %v with %v by backend %+v", fullURL, streamURL, backend)
 	}
 
+	bindStreamOrigin(ctx, v.loadBalancer, streamURL, backend)
 	return nil
 }
 
