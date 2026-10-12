@@ -1179,6 +1179,89 @@ func TestRtmpConnection_Serve_PublisherInvokesNewBackend(t *testing.T) {
 	}
 }
 
+// closeNotifyConn unblocks readers waiting on closedCh when Close runs.
+type closeNotifyConn struct {
+	fakeConn
+	once     sync.Once
+	closedCh chan struct{}
+}
+
+func (c *closeNotifyConn) Close() error {
+	err := c.fakeConn.Close()
+	c.once.Do(func() { close(c.closedCh) })
+	return err
+}
+
+func TestRtmpConnection_Serve_ViewerClientExitClosesBackend(t *testing.T) {
+	clientProto := &rtmpfakes.FakeProtocol{}
+	var clientReads atomic.Int32
+	clientProto.ReadMessageStub = func(context.Context) (rtmp.Message, error) {
+		// connect + play identify, then the copy loop sees the player go away.
+		if int(clientReads.Add(1)) <= 2 {
+			return rtmp.NewMessageWithType(rtmp.MessageTypeAMF0Command), nil
+		}
+		return nil, io.EOF
+	}
+	queueDecode(clientProto,
+		connectReqPacket("rtmp://1.2.3.4/live"),
+		playReqPacket("stream"),
+	)
+
+	origin := &closeNotifyConn{closedCh: make(chan struct{})}
+	backendProto := &rtmpfakes.FakeProtocol{}
+	var backendReads atomic.Int32
+	backendProto.ReadMessageStub = func(context.Context) (rtmp.Message, error) {
+		// connect res, createStream res, Play.Start, then the media copy blocks
+		// until the origin socket is closed.
+		if int(backendReads.Add(1)) <= 3 {
+			return rtmp.NewMessageWithType(rtmp.MessageTypeAMF0Command), nil
+		}
+		<-origin.closedCh
+		return nil, io.EOF
+	}
+	queueDecode(backendProto,
+		rtmp.NewConnectAppResPacket(0),
+		createStreamRes(1),
+		onStatusPacket("NetStream.Play.Start"),
+	)
+
+	originLB := &lbfakes.FakeOriginLoadBalancer{}
+	originLB.PickReturns(&lb.OriginServer{IP: "10.0.0.1", RTMP: []string{"1935"}}, nil)
+
+	rc := newRTMPConnection(func(c *rtmpConnection) {
+		c.loadBalancer = originLB
+		c.newHandshake = func() rtmp.Handshake { return &rtmpfakes.FakeHandshake{} }
+		c.newProtocol = func(io.ReadWriter) rtmp.Protocol { return clientProto }
+		c.newBackend = func(clientType RTMPClientType) *rtmpClientToBackend {
+			return newRTMPClientToBackend(func(b *rtmpClientToBackend) {
+				b.typ = clientType
+				b.loadBalancer = originLB
+				b.dial = func(context.Context, string, int) (io.ReadWriteCloser, error) {
+					return origin, nil
+				}
+				b.newHandshake = func() rtmp.Handshake { return &rtmpfakes.FakeHandshake{} }
+				b.newProtocol = func(io.ReadWriter) rtmp.Protocol { return backendProto }
+			})
+		}
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- rc.serve(context.Background(), &fakeNetConn{})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve blocked after client EOF; backend play was not closed")
+	}
+	if !origin.closed.Load() {
+		t.Fatal("backend conn was not closed")
+	}
+}
+
 func TestRtmpConnection_Serve_ViewerInvokesNewBackend(t *testing.T) {
 	f := newConnFixture()
 	queueDecode(f.clientProto,

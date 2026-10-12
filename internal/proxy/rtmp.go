@@ -201,15 +201,21 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 	defer cancel()
 
 	var backend *rtmpClientToBackend
-	// On cancel, only close the client conn to unblock handshake/reads.
-	// Backend is closed solely via defer backend.Close() after proxy goroutines
-	// finish, avoiding a concurrent double-close race on tcpConn.
-	if true {
-		go func() {
-			<-ctx.Done()
-			conn.Close()
-		}()
-	}
+	var backendMu sync.Mutex
+	// Closing only the frontend conn leaves the backend->client copy blocked in
+	// ReadFull when the origin has no media. SRS play sets recv timeout to
+	// never, so that backend rtmp-play stays established. Close both sides.
+	// Close is idempotent, so the deferred Close below is safe.
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+		backendMu.Lock()
+		b := backend
+		backendMu.Unlock()
+		if b != nil {
+			_ = b.Close()
+		}
+	}()
 
 	// Simple handshake with client.
 	hs := v.newHandshake()
@@ -341,8 +347,13 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 		tcUrl, streamName, currentStreamID, clientType)
 
 	// Find a backend SRS server to proxy the RTMP stream.
-	backend = v.newBackend(clientType)
-	defer backend.Close()
+	// Publish it before Connect so a client disconnect during dial also
+	// closes the origin socket.
+	created := v.newBackend(clientType)
+	backendMu.Lock()
+	backend = created
+	backendMu.Unlock()
+	defer created.Close()
 
 	// For publisher connections, use ConnectWithRetry to enable automatic repick
 	// when the initially picked backend is unreachable.
@@ -392,6 +403,14 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 	}
 	logger.Debug(ctx, "RTMP start streaming")
 
+	// Snapshot under closeMu so Close nil-ing the field cannot race the copy.
+	created.closeMu.Lock()
+	backendProto := created.client
+	created.closeMu.Unlock()
+	if backendProto == nil {
+		return errors.Errorf("backend closed before streaming")
+	}
+
 	// For all proxy goroutines.
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -405,7 +424,7 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 
 		r0 = func() error {
 			for {
-				m, err := backend.client.ReadMessage(ctx)
+				m, err := backendProto.ReadMessage(ctx)
 				if err != nil {
 					return errors.Wrapf(err, "read message")
 				}
@@ -435,7 +454,7 @@ func (v *rtmpConnection) serve(ctx context.Context, conn net.Conn) error {
 				//logger.Debug(ctx, "client-> %v %v %vB", m.MessageType(), m.Timestamp(), len(m.Payload()))
 
 				// TODO: Update the stream ID if not the same.
-				if err := backend.client.WriteMessage(ctx, m); err != nil {
+				if err := backendProto.WriteMessage(ctx, m); err != nil {
 					return errors.Wrapf(err, "write message")
 				}
 			}
